@@ -1376,9 +1376,9 @@ impl AudioHandler {
             cpal::SampleFormat::F64 => self.build_output_stream::<f64>(&config, &device),
             f => bail!("unsupported audio format: {:?}", f),
         };
-        if config.channels > format0.channels as _ {
+        if config.channels > format0.channels as u16 {
             let no_rechannel_config = StreamConfig {
-                channels: format0.channels as _,
+                channels: format0.channels as u16,
                 ..config.clone()
             };
             if let Err(_) = build_output_stream(no_rechannel_config) {
@@ -4381,3 +4381,4 @@ async fn udp_nat_connect(
         })?;
     Ok((res.1, Some(res.0), typ))
 }
+
