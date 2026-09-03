@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>GateDesk</string>
+	<key>CFBundleExecutable</key>
+	<string>gatedesk</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.carriez.GateDesk</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>GateDesk</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.5.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.5.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>GateDesk 需要访问麦克风，以便在远程协助会话中传输声音。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>GateDesk 需要屏幕录制权限，以便远程协助时共享您的屏幕。</string>
+</dict>
+</plist>
