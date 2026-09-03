@@ -1,11 +1,11 @@
 [package]
-name = "GateDesk"
+name = "gatedesk"
 version = "1.5.0"
 authors = ["rustdesk <info@rustdesk.com>"]
 edition = "2021"
 build= "build.rs"
 description = "GateDesk Remote Desktop"
-default-run = "GateDesk"
+default-run = "gatedesk"
 rust-version = "1.75"
 
 [lib]
@@ -221,7 +221,7 @@ libxdo-sys = { path = "libs/libxdo-sys-stub" }
 LegalCopyright = "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved."
 ProductName = "GateDesk"
 FileDescription = "GateDesk Remote Desktop"
-OriginalFilename = "GateDesk.exe"
+OriginalFilename = "gatedesk.exe"
 
 [target.'cfg(target_os="windows")'.build-dependencies]
 winres = "0.1"
@@ -238,7 +238,7 @@ docopt = "1.1"
 
 [package.metadata.bundle]
 name = "GateDesk"
-identifier = "com.carriez.rustdesk"
+identifier = "com.carriez.gatedesk"
 icon = ["res/32x32.png", "res/128x128.png", "res/128x128@2x.png"]
 osx_minimum_system_version = "10.14"
 
@@ -252,7 +252,7 @@ strip = true
 rpath = true
 
 [profile.dev]
-debug = "line-tables-only"
+debug = 1
 
 
 
