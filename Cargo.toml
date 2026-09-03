@@ -251,5 +251,5 @@ strip = true
 rpath = true
 
 [profile.dev]
-debug = 1
+debug = "line-tables-only"
 
