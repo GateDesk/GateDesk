@@ -6,16 +6,16 @@ use tiny_http::{Header, Method, Request, Response, Server};
 ///
 /// - Listens on 127.0.0.1 only (never 0.0.0.0).
 /// - Requires token: `Authorization: Bearer <token>` header or `?token=<token>` query.
-/// - Token is read from config option `api-token` (GateDesk.toml `[options]`).
+/// - Token is read from config option `api-token` (GateDesk2.toml `[options]`).
 /// - CORS: `Access-Control-Allow-Origin: *` so business web pages can fetch it.
 const PORT: u16 = 21120;
 
-/// Pids of the connect-session processes spawned by `POST /connect`.
+/// (target id, pid) of connect-session processes spawned by `POST /connect`.
 /// `POST /disconnect` closes only these windows, never the main UI process.
-static CONNECT_PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+static CONNECT_SESSIONS: OnceLock<Mutex<Vec<(String, u32)>>> = OnceLock::new();
 
-fn connect_pids() -> &'static Mutex<Vec<u32>> {
-    CONNECT_PIDS.get_or_init(|| Mutex::new(Vec::new()))
+fn connect_sessions() -> &'static Mutex<Vec<(String, u32)>> {
+    CONNECT_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 pub fn start() {
@@ -105,6 +105,51 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+fn read_body(request: &mut Request, max: usize) -> String {
+    use std::io::Read;
+    let mut s = String::new();
+    let _ = request.as_reader().take(max as u64).read_to_string(&mut s);
+    s
+}
+
+/// Extract a top-level string/bool/number field value from a small JSON body.
+/// Handles escaped quotes/backslashes inside string values; good enough for the
+/// fixed shapes this API accepts (`{"password":"..."}`, `{"enabled":true}`).
+fn json_field(body: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let rest = &body[body.find(&needle)? + needle.len()..];
+    let val = rest[rest.find(':')? + 1..].trim_start();
+    if let Some(rest) = val.strip_prefix('"') {
+        let mut out = String::new();
+        let mut it = rest.chars();
+        while let Some(c) = it.next() {
+            match c {
+                '"' => return Some(out),
+                '\\' => match it.next() {
+                    Some('"') => out.push('"'),
+                    Some('\\') => out.push('\\'),
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(other) => out.push(other),
+                    None => return Some(out),
+                },
+                c => out.push(c),
+            }
+        }
+        Some(out)
+    } else {
+        let token: String = val
+            .chars()
+            .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '}')
+            .collect();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    }
+}
+
 fn handle_connect(request: Request, query: &str) {
     let id = query_param(query, "id");
     if id.is_empty() || id.len() > 128 {
@@ -132,7 +177,7 @@ fn handle_connect(request: Request, query: &str) {
         {
             Ok(child) => {
                 log::info!("http api connect spawned pid {} args {:?}", child.id(), args);
-                connect_pids().lock().unwrap().push(child.id());
+                connect_sessions().lock().unwrap().push((id.clone(), child.id()));
                 respond(request, 200, format!("{{\"ok\":true,\"id\":\"{}\"}}", id))
             }
             Err(e) => respond(
@@ -163,9 +208,35 @@ fn terminate_pid(target_pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(windows))]
+/// Terminate the connect-session process via `kill -TERM`. No new crate needed;
+/// the spawned process is our own child so the signal is permitted.
+#[cfg(unix)]
+fn terminate_pid(target_pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-TERM", &target_pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(windows, unix)))]
 fn terminate_pid(_target_pid: u32) -> bool {
     false
+}
+
+/// Whether a recorded connect-session process is still running.
+#[cfg(unix)]
+fn pid_alive(target_pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &target_pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_target_pid: u32) -> bool {
+    true // keep old semantics on platforms without a cheap liveness probe
 }
 
 /// Disconnect the remote-session processes spawned by `POST /connect`.
@@ -174,18 +245,21 @@ fn terminate_pid(_target_pid: u32) -> bool {
 /// (process ids captured at spawn time). It never touches the main GateDesk UI
 /// process and performs no system-level action (no shutdown / logoff / reboot).
 fn disconnect_api_sessions() -> usize {
-    let mut pids = connect_pids().lock().unwrap();
+    let mut sessions = connect_sessions().lock().unwrap();
     let mut closed = 0usize;
-    let mut still_alive: Vec<u32> = Vec::new();
-    for &pid in pids.iter() {
-        if terminate_pid(pid) {
+    let mut keep: Vec<(String, u32)> = Vec::new();
+    for (id, pid) in sessions.iter() {
+        if !pid_alive(*pid) {
+            continue; // window already closed by the user -> session ended
+        }
+        if terminate_pid(*pid) {
             log::info!("http api disconnect terminated pid {}", pid);
             closed += 1;
         } else {
-            still_alive.push(pid); // process already gone -> session already ended
+            keep.push((id.clone(), *pid)); // still alive but terminate failed
         }
     }
-    *pids = still_alive;
+    *sessions = keep;
     closed
 }
 
@@ -196,6 +270,85 @@ fn handle_disconnect(request: Request) {
         200,
         format!("{{\"ok\":true,\"closed\":{}}}", closed),
     );
+}
+
+/// Set the machine's connection password so the operator can reach it by
+/// `id + password`. Uses the permanent-password primitive because the
+/// one-time (temporary) password can only be auto-rotated, not set to a
+/// caller-chosen value; the page should re-call this endpoint with a fresh
+/// random value after each session to rotate the credential.
+fn handle_password(mut request: Request) {
+    let body = read_body(&mut request, 1024);
+    let password = json_field(&body, "password").unwrap_or_default();
+    if password.is_empty() || password.len() > 64 {
+        respond(
+            request,
+            400,
+            "{\"ok\":false,\"error\":\"missing or invalid password\"}".to_owned(),
+        );
+        return;
+    }
+    let ok = crate::ui_interface::set_permanent_password_with_result(password);
+    if ok {
+        respond(request, 200, "{\"ok\":true}".to_owned());
+    } else {
+        respond(
+            request,
+            500,
+            "{\"ok\":false,\"error\":\"failed to set password\"}".to_owned(),
+        );
+    }
+}
+
+/// Toggle voice by driving the global `audio-input` option (which restarts the
+/// audio service). This is a PoC approximation of per-session voice: the exact
+/// session-level toggle needs a live in-process `Session` handle, which the
+/// process-spawn connect model does not hold.
+fn handle_voice(mut request: Request) {
+    let body = read_body(&mut request, 1024);
+    match json_field(&body, "enabled") {
+        Some(v) if v == "true" || v == "false" => {
+            let on = v == "true";
+            crate::ui_interface::set_option(
+                "audio-input".to_owned(),
+                if on { "Y" } else { "" }.to_owned(),
+            );
+            respond(request, 200, format!("{{\"ok\":true,\"enabled\":{}}}", on));
+        }
+        _ => respond(
+            request,
+            400,
+            "{\"ok\":false,\"error\":\"missing or invalid enabled\"}".to_owned(),
+        ),
+    }
+}
+
+/// Live session status. `in_session` reflects whether a connect-session spawned
+/// by this API is still running (stale pids are pruned), and `peer_id` is that
+/// session's target id. `online` reflects whether GateDesk has logged in to the
+/// rendezvous server. True cross-process per-session state is out of scope for
+/// the PoC.
+fn handle_status(request: Request) {
+    let online = crate::ui_interface::get_connect_status().status_num != 0;
+    let mut sessions = connect_sessions().lock().unwrap();
+    sessions.retain(|(_, pid)| pid_alive(*pid));
+    let peer_id = sessions.last().map(|(id, _)| id.clone());
+    drop(sessions);
+    match peer_id {
+        Some(id) => respond(
+            request,
+            200,
+            format!(
+                "{{\"online\":{},\"in_session\":true,\"peer_id\":\"{}\"}}",
+                online, id
+            ),
+        ),
+        None => respond(
+            request,
+            200,
+            format!("{{\"online\":{},\"in_session\":false,\"peer_id\":null}}", online),
+        ),
+    }
 }
 
 fn handle(request: Request) {
@@ -210,7 +363,7 @@ fn handle(request: Request) {
             Some(h) => response.with_header(h),
             None => response,
         };
-        let response = match header("Access-Control-Allow-Headers", "Authorization") {
+        let response = match header("Access-Control-Allow-Headers", "Authorization, Content-Type") {
             Some(h) => response.with_header(h),
             None => response,
         };
@@ -242,11 +395,20 @@ fn handle(request: Request) {
             let id = crate::ipc::get_id();
             respond(request, 200, format!("{{\"id\":\"{}\"}}", id));
         }
+        (&Method::Get, "/status") => {
+            handle_status(request);
+        }
         (&Method::Post, "/connect") => {
             handle_connect(request, query);
         }
         (&Method::Post, "/disconnect") => {
             handle_disconnect(request);
+        }
+        (&Method::Post, "/password") => {
+            handle_password(request);
+        }
+        (&Method::Post, "/voice") => {
+            handle_voice(request);
         }
         (&Method::Get, _) | (&Method::Post, _) => {
             respond(request, 404, "{\"error\":\"not found\"}".to_owned());
