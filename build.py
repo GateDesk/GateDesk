@@ -376,6 +376,56 @@ Description: A remote control software.
 
 def ffi_bindgen_function_refactor():
     # workaround ffigen
+    generated_bridge = pathlib.Path('flutter/lib/generated_bridge.dart')
+    if windows and generated_bridge.exists():
+        content = generated_bridge.read_text()
+        content = content.replace(
+            'typedef bool = ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Int>)>;',
+            '')
+        content = content.replace('ffi.Pointer<bool>', 'ffi.Bool')
+        content = content.replace('ffi.Pointer<NativeBool>', 'ffi.Bool')
+        content = content.replace('ffi.Bool', 'bool')
+        content = re.sub(
+            r'ffi\.NativeFunction<.*?>>',
+            lambda match: match.group(0).replace('bool', 'ffi.Bool'),
+            content,
+            flags=re.DOTALL)
+        content = content.replace(
+            'void store_dart_post_cobject(\n    int ptr,',
+            'void store_dart_post_cobject(\n    DartPostCObject ptr,')
+        content = content.replace(
+            'ffi.NativeFunction<ffi.Void Function(ffi.Int)>>(\n'
+            "          'store_dart_post_cobject');",
+            'ffi.NativeFunction<ffi.Void Function(DartPostCObject)>>(\n'
+            "          'store_dart_post_cobject');")
+        content = content.replace(
+            '.asFunction<void Function(int)>();\n\n  Dart_Handle get_dart_object(',
+            '.asFunction<void Function(DartPostCObject)>();\n\n'
+            '  Object get_dart_object(')
+        content = content.replace(
+            'int new_dart_opaque(\n    Dart_Handle handle,',
+            'int new_dart_opaque(\n    Object handle,')
+        content = content.replace(
+            'return _new_dart_opaque(\n      handle,\n    );',
+            'return _new_dart_opaque(\n      handle as Dart_Handle,\n    );')
+        content = content.replace(
+            'external ffi.Pointer<ffi.Int> ptr;\n\n  @ffi.Int()\n  external int len;\n}\n\nfinal class wire_int_32_list',
+            'external ffi.Pointer<ffi.Uint8> ptr;\n\n  @ffi.Int()\n  external int len;\n}\n\nfinal class wire_int_32_list')
+        content = content.replace(
+            'final class wire_int_32_list extends ffi.Struct {\n'
+            '  external ffi.Pointer<ffi.Int> ptr;',
+            'final class wire_int_32_list extends ffi.Struct {\n'
+            '  external ffi.Pointer<ffi.Int32> ptr;')
+        content = content.replace(
+            'ffi.NativeFunction<ffi.Bool Function(DartPort',
+            'ffi.NativeFunction<ffi.Uint8 Function(DartPort')
+        if 'class GatedeskImpl' in content and 'typedef RustdeskImpl = GatedeskImpl;' not in content:
+            content = content.replace(
+                "part 'generated_bridge.freezed.dart';",
+                "part 'generated_bridge.freezed.dart';\n\n"
+                "typedef RustdeskImpl = GatedeskImpl;")
+        generated_bridge.write_text(content)
+        return
     system2(
         'sed -i "s/ffi.NativeFunction<ffi.Bool Function(DartPort/ffi.NativeFunction<ffi.Uint8 Function(DartPort/g" flutter/lib/generated_bridge.dart')
 
@@ -932,6 +982,7 @@ def build_flutter_windows(version, features, skip_portable_pack):
         if not os.path.exists("target/release/librustdesk.dll"):
             print("cargo build failed, please check rust source code.")
             exit(-1)
+    ffi_bindgen_function_refactor()
     os.chdir('flutter')
     system2('flutter build windows --release')
     os.chdir('..')
