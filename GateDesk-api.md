@@ -1,8 +1,8 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.2（2026-09-03）
+> 版本：1.4（2026-09-07）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
-> 维护约定：**修改源码 `gatedesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）。
+> 维护约定：**修改源码 `gatedesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；变更配置路径/`[options]` 键语义（涉及 `libs/hbb_common/src/config.rs`、`src/ui_interface.rs`）时同步更新「附录 A：GateDesk2.toml 配置文件」。
 
 ---
 
@@ -268,26 +268,7 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
    └─ 远程结束 → POST /disconnect（仅断开该远程会话，不关主界面/不关机）
 ```
 
-## 9. 开发与测试
-
-### 9.1 开发期编译（快）
-
-```powershell
-cd gatedesk
-$env:VCPKG_ROOT="C:\Users\deepblue\vcpkg"
-$env:LIBCLANG_PATH="C:\Users\deepblue\LLVM\bin"
-cargo build --features inline -j 16        # debug，增量约 0.7s
-Copy-Item "$env:USERPROFILE\Downloads\rustdesk_build\sciter.dll" target\debug\  # 首次
-```
-
-### 9.2 发布编译
-
-```powershell
-cargo build --release --features inline -j 16
-Copy-Item "$env:USERPROFILE\Downloads\rustdesk_build\sciter.dll" target\release\
-```
-
-### 9.3 冒烟测试命令
+## 9. 冒烟测试命令
 
 ```powershell
 # 正确 token → 200
@@ -306,8 +287,70 @@ netstat -ano | findstr 21120
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
-| 2026-09-03 | 1.0 | 初始版本：`GET /id`、`POST /connect` |
-| 2026-09-03 | 1.1 | 新增 `POST /disconnect`（仅断开本 API 发起的远程会话，不关主界面/不关机） |
+| 2026-09-07 | 1.4 | 精简文档：移除与 API/配置无关的编译章节（原 9.1 开发期编译、9.2 发布编译），保留冒烟测试；变更记录按版本降序整理 |
+| 2026-09-07 | 1.3 | 补充「附录 A：GateDesk2.toml 配置文件」：各平台路径、配置项、数据来源与优先级 |
 | 2026-09-03 | 1.2 | 新增 `GET /status`、`POST /password`、`POST /voice`；`/disconnect` 支持 macOS/Linux（SIGTERM）；预检允许 `Content-Type` 请求头 |
+| 2026-09-03 | 1.1 | 新增 `POST /disconnect`（仅断开本 API 发起的远程会话，不关主界面/不关机） |
+| 2026-09-03 | 1.0 | 初始版本：`GET /id`、`POST /connect` |
+
+---
+
+## 附录 A：GateDesk2.toml 配置文件
+
+HTTP API 的鉴权 token（`api-token`）与语音开关（`audio-input`）等配置存放在 **GateDesk2.toml**（即 CONFIG2）的 `[options]` 表。本节说明其路径、结构、数据来源与写入方式。
+
+### A.1 配置文件与位置（不同平台）
+
+GateDesk 有两个配置文件，均由 `hbb_common::config` 管理：
+
+| 文件 | 常量 | 内容 |
+|------|------|------|
+| `GateDesk.toml` | CONFIG1 | 主配置：设备 ID、密钥对等 |
+| `GateDesk2.toml` | CONFIG2 | 安全相关与用户设置：`[options]` 表、socks 凭据、unlock_pin 等 |
+
+路径
+
+| 平台 | GateDesk2.toml 完整路径 |
+|------|------------------------|
+| Windows | `%APPDATA%\GateDesk\config\GateDesk2.toml`（即 `C:\Users\<用户名>\AppData\Roaming\GateDesk\config\`） |
+| macOS | `~/Library/Preferences/com.carriez.GateDesk/GateDesk2.toml` |
+| Linux | `$XDG_CONFIG_HOME/GateDesk/GateDesk2.toml`，未设置则 `~/.config/GateDesk/GateDesk2.toml` |
+| Android / iOS | 应用沙盒目录（APP_DIR）内 |
+
+
+
+### A.2 数据来源与读取优先级
+
+
+
+HTTP API 侧实际通过 `ui_interface::get_option("api-token")` 读取**启动时缓存的** OPTIONS 内存副本（桌面进程）。因此：
+
+- 外部修改 `GateDesk2.toml` 后需**重启 GateDesk** 才生效；
+- 应用内 `set_option` 的写入路径为：UI 进程内存缓存 → IPC 通知主/服务进程 → `Config::set_option` 更新 `CONFIG2.options` 并落盘。
+
+### A.3 与 HTTP API 相关的 `[options]` 配置项
+
+| 键 | 值语义 | 说明 |
+|----|--------|------|
+| `api-token` | 任意字符串（建议高强度随机） | 本地 HTTP API 鉴权 token。`http_api.rs` 通过 `get_option("api-token")` 读取，为空视为未配置（所有接口返回 401 `api-token not configured`）。由部署脚本（`start.sh` / `start-client.sh` / `start-client.ps1`）或手工编辑写入文件，应用自身不写此键。 |
+| `audio-input` | `Y` 启用；空/删除 禁用 | 语音输入总开关。`POST /voice` 写入（`set_option("audio-input", ...)`）；空值会被 `set_option` 从表中移除。 |
+
+其余 `[options]` 键为 GateDesk UI 设置项，本节不展开，见 `config.rs` 的 `default_options()` 与 `keys.rs`。
+
+### A.4 文件结构示例与 TOML 注意事项
+
+```toml
+[options]
+api-token = 'k7Fp…（随机串）'
+audio-input = 'Y'
+```
+
+- 键名使用连字符（`api-token`），字符串建议用**单引号**字面量包裹。
+- 文件已有 `[options]` 表头时，直接在其中**追加/修改键行**，**绝不新增第二个 `[options]` 表头**（重复表头会导致 TOML 解析失败，配置读取异常）。
+- 值含特殊字符时使用单引号 `'...'`（TOML 字面量字符串，不转义）。
+- 修改后需重启 GateDesk（配置在启动时缓存）。
+
+
+
 
 
