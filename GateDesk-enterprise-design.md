@@ -1,0 +1,494 @@
+# GateDesk 企业专版改造方案（需求分析与设计草案）
+
+> 版本：v0.2（详细设计草案）
+> 日期：2026-09-07
+> 状态：**编码前文档**。本文基于对现有代码库（Sciter UI 版为主）的只读调研编写；所有"现状"均已核实。目标读者：方案评审人、后续实施工程师。
+> 约定：文中 `R-x` 为需求条目，`D-x` 为待决策项，`Q-x` 为需业务方澄清的问题。v0.2 起：未决决策点按文中「建议默认值」推进，最终以 P0 评审为准；`§12 详细设计` 面向可编码。
+
+---
+
+## 1. 背景与目标
+
+GateDesk（RustDesk 改名 fork）将作为**企业专版**的远程能力被嵌入第三方**业务客户端**：
+
+- 平时对最终用户**无感**：不出现主窗口，进程常驻后台，系统托盘可感知；
+- 由**业务客户端**统一负责 GateDesk 的安装、启动、停止；
+- 远程会话进行中，界面只呈现极少量必要元素与状态；
+- 语音、远程重启、录制会话、阻止用户输入、隐私模式等**敏感操作**的状态必须可见，且所有操作**留有审计记录**（合规要求）。
+
+本文回答三件事：**现在有什么（可复用）**、**差距在哪**、**改造方案怎么做**。
+
+---
+
+## 2. 术语
+
+| 术语 | 含义 |
+|------|------|
+| 被控端 / 受控端 | 被远程的一方（员工机上的 GateDesk） |
+| 控制端 | 发起远程的一方（运维人员，GateDesk 控制端或网页/业务系统） |
+| 业务客户端 | 第三方打包方软件，负责部署并启停 GateDesk |
+| 会话窗口 | 一次远程连接时出现的界面（当前为 remote.html） |
+| 主界面 | 无参启动时的完整客户端界面（当前为 index.html） |
+
+---
+
+## 3. 现状盘点（已核实）
+
+### 3.1 可直接复用（无需重造）
+
+| 能力 | 现状位置 | 说明 |
+|------|----------|------|
+| 无 UI 后台形态 | `--server`（core_main 返回 None，不进 UI；启动 http_api + start_server） | 现成的"被托管后台进程" |
+| 系统服务 | `--install-service / --uninstall-service / --service / --portable-service`；Windows `sc create … --service` | 可安装为 OS 服务 |
+| 系统托盘 | `src/tray.rs`（`--tray` 参数）；托盘在服务运行时出现，菜单含 Stop service | 托盘基础存在 |
+| 本地 HTTP API | `src/http_api.rs`（127.0.0.1:21120，token 鉴权） | 业务客户端/网页的操控入口已具备 |
+| 语音通讯 | `server/audio_service.rs`；协议 `NewVoiceCall/CloseVoiceCall`；CM 侧 `in_voice_call` 布尔；`ui/remote.rs on_voice_call_*` 事件 | 能力完整；**Sciter 会话界面无独立语音控件** |
+| 隐私模式 | `src/privacy_mode.rs`（turn_on/off、is_in_privacy_mode、PrivacyModeState 事件） | 完整；UI 已有菜单与图标 |
+| 阻止用户输入 | `block_input` 布尔（Windows SAS 会话） | 仅 Windows 支持 |
+| 会话录制 | `record_screen()`、`recording` 状态、录制存储路径 | 完整；UI 已有录制图标 |
+| 远程重启（对端） | `restart_remote_device()`（控制端发起）；被控端 `system_shutdown` 执行 | 完整 |
+| 结构化审计通道 | `server/connection.rs` 的 `post_conn_audit / post_file_audit / post_alarm_audit`；`send_note()`；审计服务器 URL 由 `get_audit_server()` 生成 | 已有 HTTP 审计通道；**覆盖面窄** |
+| 隐藏窗口模式 | `--cm` + `hide_cm` → `collapse(true)` | 现成"建窗口但不显示"的参考 |
+| UI 精简模式 | index.html 的 `incoming_only / outgoing_only` | 界面裁剪可复用思路 |
+| 内嵌 UI 资源 | `feature=inline` → `src/ui/inline.rs`（res/inline-sciter.py 生成） | 不影响无 UI 启动（不加载即不执行） |
+
+### 3.2 差距（改造点）
+
+1. **默认启动即弹主界面**：无参启动 = 主界面 + start_server + http_api（`core_main.rs` 空参分支）；不存在"默认后台、显式开 UI"的产品形态。
+2. **界面元素繁复**：index / cm / remote 均为全功能界面，需裁剪或新增极简版。
+3. **语音状态在 Sciter 会话界面无独立控件**（GateDeskWeb 有，Sciter 无）。
+4. **审计不覆盖操作级**：现有审计限于 conn/file/alarm/note；语音、录制、隐私、阻止输入、远程重启等操作无审计事件。
+5. **"会话时长 / 设备基本信息"无集中展示**，需在会话界面补充（需细化来源字段）。
+6. **无"业务客户端启停契约"的固化实现**：`--server` 可启停，但停止方式（stop-service option / 进程终止）与状态查询约定未成文；打包/静默部署资料零散。
+
+---
+
+## 4. 需求分解与设计方向
+
+> 六条业务诉求展开为 R-1…R-12。每条含：目标、现状依据、设计要点、验收可测项。
+
+### R-1 默认无任何主界面（企业版运行形态）
+
+- **目标**：部署后不得自动弹出主界面；一切功能通过服务化后台 + 托盘/HTTP 呈现。
+- **设计要点**：
+  - 业务客户端统一以 `gatedesk --server`（或安装服务 `--service`）启动 → 该路径本就不建窗口（复用）；
+  - 将"空参启动=主界面"从企业版默认路径剔除：企业版默认入口 = 后台服务；仅显式命令才开界面。
+- **决策点 D-1**：采用"运行时参数门控"（默认仍兼容原主界面，企业打包一律 `--server`）还是"编译期裁剪"（新 feature 如 `enterprise`，默认主界面代码/资源不编入）？建议运行时门控（改动小、便于诊断回退），最终由发布形态决定。
+- **验收**：安装后无任何窗口；任务栏无主程序图标；进程列表可见 `--server` 进程。
+
+### R-2 通过特殊命令显式开启界面
+
+- **目标**：保留可开启完整/精简界面的后门，供诊断与首次配置。
+- **设计要点**：定义并文档化特殊命令，例如：
+  - `gatedesk --ui`：打开完整主界面（现状 `index.html`，等价旧无参行为）；
+  - `gatedesk --cm`：连接管理器/被控接受窗口（现状保留）；
+  - `gatedesk --connect <id> [password]`：控制端会话（现状保留）；
+  - 明确 `--server / --service / --tray` 为无界面路径。
+- **验收**：除上述显式命令外，任何启动路径不产生主窗口。
+
+### R-3 精简界面元素（企业版 UI 瘦身）
+
+- **目标**：界面只保留业务必要元素。
+- **范围（会话窗口 remote / 主界面 index / 托盘菜单）见 §6 清单。**
+- **决策点 D-2**：全量 UI 是否仍随包分发（运行时开关隐藏）还是独立极简资源替换？倾向：新增极简资源 + 原资源保留给 `--ui`。
+
+### R-4 五类操作的状态必须在界面明确展示
+
+涉及操作：**语音通讯、远程重启、录制会话、阻止用户输入、隐私模式**。
+
+- **现状对照**：
+
+| 操作 | 是否存在 | 现状态信号 | 现状 UI 展示 | 缺口 |
+|------|---------|-----------|-------------|------|
+| 语音 | 有 | `in_voice_call`（CM/连接层） | 无独立 Sciter 控件 | 会话窗口加语音开关与状态 |
+| 远程重启 | 有 | 一次性命令（无持续状态） | 菜单项 | 属"瞬时操作"，需审计 + 日志，未必有持续状态 |
+| 录制 | 有 | `recording` 布尔 | 有录制图标（remote header） | 状态需在精简界面保留/强调 |
+| 阻止输入 | 有（Win） | `block_input` 布尔 | 有菜单/图标（Win） | 精简界面展示 + 跨平台说明 |
+| 隐私模式 | 有 | `privacy_mode` 布尔 + PrivacyModeState 事件 | 有菜单/图标 | 精简界面展示 |
+
+- **设计要点**：
+  - 极简会话界面（§6.2）常驻"状态条"：语音/录屏/隐私/输入锁定四态图标 + 文字，`on` 时高亮；
+  - 状态来源统一走会话事件（`ui_session_interface` / `ui_cm_interface` 现有布尔与事件），不新造状态通道；
+  - 远程重启因无"持续中"语义，展示为可执行操作 + 结果反馈（成功/失败/审计已记录）。
+- **验收**：四类持续状态任一打开，会话界面立即可见；关闭后消失。
+
+### R-5 操作审计记录（合规）
+
+- **目标**：所有敏感操作留痕：谁（peer/本机）、何时、何操作、对象、结果。
+- **现状**：已有 HTTP 审计设施（conn/file/alarm/note → 审计服务器），`get_audit_server()` 配置驱动。
+- **设计要点**：
+  - 扩展审计类型表（§7.3）：connect/disconnect、语音开/关、录制开始/结束、隐私开/关、阻止输入开/关、远程重启、改密码（/password）等；
+  - 复用 `post_*_audit` 通道 + `alarm` 类；载荷约定统一（action/peer/ts/result）；
+  - 审计失败需本地兜底（写审计日志文件），避免丢记录；
+  - 控制端会话窗口与托盘均可查"本次会话审计流水（本地）"。
+- **验收**：对每种操作执行一次后，审计服务器/日志出现对应记录，含时间、对端、结果。
+
+### R-6 远程桌面"变成服务"常驻
+
+- **目标**：一旦进入企业部署，GateDesk 以服务/后台形态常驻，不依赖交互式登录窗口。
+- **现状**：`--server`（用户态，需会话）、`--service`（OS 服务，Windows sc create）。Linux/macOS 亦有对应机制（launchd/portable-service 等）。
+- **决策点 D-3**：企业默认形态选型——`--server`（用户态，简单、托盘友好、不需管理员）vs `--service`（系统服务，开机最早、权限高、GUI 受限）。**建议：默认 `--server` 用户态常驻 + 托盘；仅需开机即被控/提权场景用 `--service`。**
+- **验收**：远程会话结束后进程保持常驻；再次被连无需人工干预。
+
+### R-7 打包进业务客户端，业务方可启停
+
+- **目标**：业务客户端可控 GateDesk 生命周期与状态。
+- **设计要点**：
+  - 启停契约成文：启动 = `gatedesk --server`；停止 = 写 `stop-service` option（经 `--option` 或新 HTTP 接口）或优雅退出信号；查询 = 扩展 `http_api`（现 `/status` 只回 online/in_session）；
+  - 补充"是否存在进程/版本/是否被控中/语音等状态"的查询接口（扩展 `/status` 或新增 `/info`）；
+  - 防重复启动（端口 21120 占用即已有实例 → 业务客户端据此判活）。
+- **验收**：业务客户端可完成 启动→确认在线→触发连接→断开→停止 全链路。
+
+### R-8 系统托盘
+
+- **目标**：GateDesk 常驻时有托盘入口，退出/停止/查看状态可达。
+- **现状**：`--tray` / `src/tray.rs` 已有托盘（含 Stop service）；macOS `--server` 带托盘。
+- **设计要点**：托盘菜单按企业版裁剪：显示本机 ID、是否被控中/语音中、打开精简界面、停止服务/退出。托盘在 `--server` 形态下默认出现，可在配置关闭（`hide-tray` 类 option，待定）。
+- **决策点 D-4**：托盘是否默认显示？（合规与"无感"平衡；倾向默认显示——便于审计可见性。）参考已见 `tray.rs` 有 `hide_stop_service` 处理。
+- **验收**：`--server` 启动后系统托盘出现图标；菜单项工作正常。
+
+### R-9 控制端（会话）界面极简
+
+- **目标**：会话窗口仅保留：语音通讯、断开连接、连接时长、对端设备基本信息。
+- **设计要点**：新增/裁剪 remote 极简布局：
+  - 顶部/悬浮条：对端基本信息（设备名/平台/ID/登录用户，来自 `handle_peer_info`）、**连接时长计时**（需确认现 UI 有无计时，见 Q-4）；
+  - 按钮：语音开关、断开；
+  - 状态条（R-4）与上述共存但克制呈现。
+- **验收**：极简界面元素清单与需求一一对应，无多余导航/工具。
+
+### R-10 被控端（受控侧）交互最小化
+
+- **目标**：员工机侧不出现复杂界面。
+- **范围**：见 §6.3。受控侧在日常无窗口；被连时以托盘/轻提示呈现"正在被连接/语音中"，不接受/拒绝流程（企业固定密码授权）。
+- **决策点 D-5**：被控端是否需要"接受/拒绝"确认？（默认：不需要——固定密码 + 白名单即授权；需可配置。）
+
+---
+
+## 5. 目标形态（进程模型）
+
+```text
+┌─ 业务客户端（第三方）─────────────────────────────┐
+│  部署/升级/签名；生命周期管理                       │
+│  启动:  spawn gatedesk --server                    │
+│  停止:  设置 stop-service / 优雅退出                │
+│  查询:  HTTP GET 127.0.0.1:21120(/status 扩展)     │
+└──────────────────────┬─────────────────────────────┘
+                       │
+        ┌──────────────▼──────────────────────────┐
+        │ gatedesk --server   （用户态后台常驻）    │
+        │ · http_api :21120（token 鉴权）          │
+        │ · start_server：被控/远控监听            │
+        │ · 托盘（--tray，默认出现）               │
+        │ · 语音服务 / privacy / 审计上报          │
+        └───────┬──────────────────┬──────────────┘
+                │ 本机发起（运维）    │ 他端连入（被控）
+        ┌───────▼────────┐  ┌───────▼──────────────┐
+        │ 会话子进程       │  │ 被控会话（轻提示）    │
+        │ --connect 极简   │  │ 托盘/轻浮层：连接中、 │
+        │ 会话窗口(R-9)    │  │ 语音、时长           │
+        └────────────────┘  └──────────────────────┘
+```
+
+关键不变式：本机同一时刻仅一个进程提供 :21120（先占者生效，后启者静默禁用，现状机制保留）。
+
+---
+
+## 6. 界面改造设计
+
+### 6.1 无 UI 与显式开启（R-1/R-2）
+
+| 启动路径 | 结果 | 用途 |
+|----------|------|------|
+| `--server` | 无窗口，后台常驻 + http_api（+ 可选托盘） | 企业默认（业务客户端拉起） |
+| `--service`（/`--install-service`） | OS 服务，无窗口 | 开机即被控等场景 |
+| `--tray` | 托盘（GUI，无主窗口） | 托盘载体 |
+| `--ui`（新） | 完整主界面（旧无参行为改名） | 诊断/首次配置 |
+| `--cm` | 连接管理器窗口（默认可隐藏） | 被控接受/状态 |
+| `--connect <id> [pass]` | 极简会话窗口 | 控制端会话（R-9） |
+| 无参 | 见 D-1：企业版建议等同 `--server`；通用版保持主界面 | — |
+
+### 6.2 控制端会话窗口（remote 极简）元素清单（R-9 + R-4）
+
+| 区域 | 元素 | 数据来源 |
+|------|------|----------|
+| 信息条 | 对端设备名 / 平台 / ID / 登录用户 | `handle_peer_info`（peer info） |
+| 计时 | 连接时长（累计） | 会话开始时间（需确认/新增计时事件，Q-4） |
+| 状态条 | 语音中 / 录屏中 / 隐私模式 / 输入锁定（高亮四态） | `in_voice_call / recording / privacy_mode / block_input` + 事件 |
+| 操作 | 语音开关、断开连接 | voice call / disconnect（现 API） |
+| （隐藏）| 其余全部导航、文件传输、设置、菜单 | 移除或按配置隐藏 |
+
+### 6.3 被控端交互（R-10）
+
+| 场景 | 呈现 |
+|------|------|
+| 平时 | 无窗口（托盘常驻） |
+| 被连接 | 托盘气泡/轻浮层：正在被控制、对端信息、连接时长、语音状态 |
+| 语音被呼入 | 托盘提示（如需应答） |
+| 录制/隐私/锁定被开启 | 轻提示 + 审计（R-4/R-5） |
+
+> 被控侧是否显示连接时长取决于 Q-6 语义确认（"显示接时间"指向哪端）。
+
+### 6.4 界面资源策略
+
+- 新增极简页面资源（建议 `src/ui/` 下新增 `remote_min.html` 或复用 remote.html 加 `enterprise` 变量分支）；
+- `inline` feature 下由 `res/inline-sciter.py` 重生成 `inline.rs`；
+- 是否裁剪原全量页面待 D-2。
+
+---
+
+## 7. 状态与审计设计
+
+### 7.1 会话状态模型（建议）
+
+会话级状态集中为一个结构（扩展现有 `ui_cm_interface::Client` 或会话对象）：
+`id / peer_info / started_at / in_voice_call / recording / privacy_mode / block_input / audit_events`
+
+> 连接时长 = `now - started_at`，由会话开始事件驱动（Q-4 补充计时事件）。
+
+### 7.2 UI 状态推送
+
+复用现有事件通道（`ui_session_interface` / `InvokeUiSession` 回调 + `self.call`）推送状态变更；极简界面订阅同一批事件，不新造机制。
+
+### 7.3 审计事件表（R-5，扩展建议）
+
+| 事件 | 载荷要点 | 现状 |
+|------|----------|------|
+| connect_start / connect_close | id、peer、ts、result | 已有 conn 审计 |
+| voice_on / voice_off | 会话 id、对端 | 无（新增） |
+| record_start / record_stop | 会话 id、对端 | 无（新增） |
+| privacy_on / privacy_off | 会话 id、对端 | 无（新增） |
+| block_input_on / off | 会话 id、对端 | 无（新增） |
+| remote_restart | 会话 id、对端、结果 | 无（新增，属 alarm 级） |
+| password_set | 来源（http /password） | 无（新增） |
+
+通道：复用 `post_conn_audit / post_alarm_audit` 与 `get_audit_server()`；增加**本地文件兜底**（`Config::log_path` 下 audit 文件），防审计服务器不可达丢记录。
+
+### 7.4 审计查询
+
+控制端会话窗口/托盘提供"本次会话审计流水"查看入口（可选）；业务客户端经 HTTP 可拉取最近审计（扩展接口，R-7）。
+
+---
+
+## 8. 服务化与业务客户端接入（R-6/R-7/R-8）
+
+1. **形态**：默认 `--server` 用户态（D-3），托盘由 `--tray`/`--server` 触发。
+2. **启停契约**（成文并沉淀进 GateDesk-command.md / GateDesk-api.md）：
+   - 启动：`gatedesk --server`；
+   - 判活：HTTP `/status` 可达 或 进程存在；
+   - 停止：a) 写 option `stop-service=Y`（现状有处理）b) 新 HTTP `POST /shutdown`（可选，需鉴权）c) 业务客户端终止进程（最后手段）；
+   - 部署：安装脚本把 gatedesk 放置到约定目录并写 `api-token`（复用 start-client 思路）。
+3. **HTTP 扩展建议**（列入后续接口设计，改动 http_api 时同步 GateDesk-api.md v1.5）：
+   - `/status` 增加字段：`version`、`running`、`in_voice_call`、`recording` 等会话状态；
+   - 可选 `/audit?last=N`（拉最近审计）。
+
+---
+
+## 9. 待澄清问题（请业务方确认）
+
+| # | 问题 | 影响 |
+|---|------|------|
+| Q-1 | 需求 6「受控端界面」指**被控端（员工机）看到的界面**，还是**控制端会话窗口**？（本文 §6.2/6.3 两种都给了初步设计，需确定主口径） | §6.2 vs §6.3 取舍 |
+| Q-2 | 本改造是否只做"被控端"企业化（员工机嵌入业务客户端被远程），控制端继续用现成 GateDesk/网页？还是两端都要企业化界面？ | 工作量与范围 |
+| Q-3 | "远程重启"= 重启**被控端操作系统**（现状 restart_remote_device 即此义）？还是重启 GateDesk 服务/会话？ | 实现位置 |
+| Q-4 | "显示连接时间"：是**连接时长累计**（会话已持续 X 分）还是**当前时刻**？现 UI 是否有计时需确认 | 界面元素 |
+| Q-5 | "阻止用户输入"仅需 Windows 吗？（现状仅 Windows SAS 支持） | 跨平台工作量 |
+| Q-6 | 会话录制文件存哪端？控制端本地（现状 Windows 存 ProgramData\…\recording）还是可配置到被控端/服务器？ | 存储设计 |
+| Q-7 | 审计上报：复用现有"审计服务器(HTTP)"通道吗？还是企业版走**业务客户端本地接口**（由业务方自行上报）？审计不可达是否必须本地落盘？ | 审计架构 |
+| Q-8 | 去掉的完整界面功能（改密码/ID/服务器地址等）通过什么途径补齐：配置文件、HTTP 接口、`--ui` 诊断界面？ | 功能迁移 |
+| Q-9 | 企业版是否仍需**语言多语言**（目前 Sciter 界面中英多语），极简界面语言范围？ | 资源裁剪 |
+| Q-10 | "去掉 gatedesk 所有界面元素" 是否包含**控制端**侧？还是仅被控端侧无界面？ | R-1 口径 |
+
+---
+
+## 10. 实施步骤（阶段规划，评审后细化）
+
+| 阶段 | 内容 | 输出/验收 |
+|------|------|-----------|
+| P0 | 本文档评审；Q-1…Q-10 澄清；D-1…D-5 决策 | 定稿需求基线 |
+| P1 | 运行形态改造：`--server` 默认化/`--ui` 门控、托盘接入与裁剪、判活与启停契约 | 部署后无窗口；业务客户端可启停查询 |
+| P2 | 极简会话界面（R-9/R-10）：信息条/计时/四态状态条/语音/断开 | 界面元素符合清单 |
+| P3 | 状态集中与审计扩展（R-4/R-5）：事件扩展、审计事件表落地、本地兜底 | 全操作审计可见 |
+| P4 | 被控端轻提示与业务接入收口：HTTP `/status` 扩展、（可选）`/audit`、打包与签名说明 | 端到端联调 |
+| P5 | 回归：原 Sciter 全量功能（`--ui`）不回归；文档同步（GateDesk-api.md / -command.md / 本方案终稿） | 发布清单 |
+
+---
+
+## 11. 附录：相关文件索引
+
+| 主题 | 文件 |
+|------|------|
+| 命令行分派/后台 | `src/core_main.rs`（--server/--service/--tray/--cm 等） |
+| UI 启动/窗口 | `src/ui.rs`（页面选择、collapse 隐藏） |
+| Sciter 页面 | `src/ui/{index,remote,cm,install}.html / .tis` |
+| 内嵌资源生成 | `res/inline-sciter.py` → `src/ui/inline.rs` |
+| 托盘 | `src/tray.rs` |
+| 服务安装 | `src/service.rs`、`src/platform/windows.rs`（sc create） |
+| 语音 | `src/server/audio_service.rs`、`libs/hbb_common/protos/message.proto` |
+| 隐私模式 | `src/privacy_mode.rs`、`src/privacy_mode/` |
+| 会话状态/事件 | `src/ui_session_interface.rs`、`src/ui_cm_interface.rs`、`src/ui/remote.rs` |
+| 录制 | `src/ui_session_interface.rs`（record_screen/is_recording） |
+| 远程重启 | 同上（restart_remote_device）；被控端 `server/connection.rs` |
+| 审计 | `src/server/connection.rs`（post_*_audit）、`src/ui_session_interface.rs`（send_note） |
+| HTTP API | `src/http_api.rs` + `GateDesk-api.md` |
+| 命令行文档 | `GateDesk-command.md` |
+
+---
+
+## 12. 详细设计 v0.2（面向可编码）
+
+> 说明：本节约定基于以下「建议默认值」（如 P0 评审调整，仅影响对应小节）：
+> D-1 运行时参数门控（不编译期裁剪）；D-3 默认 `--server` 用户态 + 托盘；D-4 托盘默认显示；D-5 被控端无需接受/拒绝（固定密码授权）；Q-1/Q-2 按「被控端嵌入业务客户端 + 控制端会话同样提供极简窗口」双向口径推进（详 §12.4）。
+
+### 12.1 启动形态改造（R-1/R-2/R-6/R-7/R-8）
+
+改动集中于 `src/core_main.rs` 启动分派，避免触碰 `main.rs/ui.rs` 之外的逻辑：
+
+1. **明确三条路径语义**（注释化）：
+   - `--server`：`return None`（现状），**企业常驻形态**，业务客户端默认入口；启动时若未运行则自拉起托盘进程（现状已有 `check_process("--tray")` 思路，落实为：`--server` 启动后检查并 `run_as_user(["--tray"])`）。
+   - 无参：现状 = start_server + http_api + 主界面。企业打包**不使用无参**；保留无参 = 主界面以兼容 `--ui` 语义（文档注明）。
+   - 新增 `--ui`：等价旧无参（主界面 + start_server + http_api），供诊断/首配（见 §12.1.2 落点）。
+2. **空参分支**（core_main 约 193-228 行区）：保持 start_server/http_api 不变；仅把"进主界面"语义显式化为 `--ui`。
+3. **托盘触发**：托盘由 `--tray` 承载（现状 tray.rs `start_tray()`）；`--server` 或空参启动时若未发现 tray 进程则拉起（复用现有 `check_process` + `run_as_user` 模式）。
+
+#### 12.1.1 启停契约（业务客户端）
+
+| 动作 | 方式 | 备注 |
+|------|------|------|
+| 启动 | `gatedesk --server`（工作目录任意；配置在 %APPDATA%\GateDesk\config） | 非阻塞 spawn，返回即视为已拉起 |
+| 判活 | HTTP `GET /status`（127.0.0.1:21120）可达；或查进程 args 含 `--server` | 复用端口占用即单实例机制 |
+| 停止 | 首选写 option `stop-service=Y`（现状处理，UI/tray 均监听）；或新增 `POST /shutdown`（鉴权，§12.6）；进程终止兜底 | 停止后 http_api 消失 |
+| 版本/信息 | `GET /status` 增加 `version`（§12.6）或 `gatedesk --version` | |
+| 升级 | 停服 → 覆盖 exe/dll → 启动 | 需注意 exe 被占用时先停 |
+
+#### 12.1.2 显式开启界面命令表（企业版对外文档）
+
+```text
+gatedesk --server        # 常驻后台（默认被控服务形态，推荐业务客户端使用）
+gatedesk --tray          # 仅托盘（GUI，无主窗口）
+gatedesk --ui            # 完整主界面（诊断/首配）
+gatedesk --cm            # 连接管理器窗口
+gatedesk --connect <id> [password] [--relay]   # 极简控制会话
+```
+
+### 12.2 托盘改造（R-8）
+
+`src/tray.rs`（现有 `start_tray / make_tray`，菜单现为 Open + Stop service + 状态行）。企业版菜单扩展：
+
+| 项 | 行为 | 数据来源 |
+|----|------|----------|
+| 状态行：服务状态 / 会话数 | 现状已有（"Service is running/Ready/{n} sessions"） | tray.rs 现逻辑 |
+| 本机 ID | 显示 | `ipc::get_id()` |
+| 状态行：语音/录制/隐私/锁定（被连中） | 会话状态 | 与 §12.4 同一状态源 |
+| Open | 打开极简主界面/信息浮层 | 调 `--ui` 或 info 页 |
+| Stop service | 现状已有 | |
+
+不新增第三方托盘依赖（复用现状 tray 库）。托盘是否默认显示的开关用 option `hide-tray`（新增默认键，`Y` 隐藏）——需在 `keys.rs` 注册（视现有注册机制而定，见实现期核对）。
+
+### 12.3 控制端会话界面（remote 极简）设计（R-9/R-4）
+
+**做法**：新增独立极简页面资源（而非改造全量 remote），避免污染原界面；通过启动参数或会话配置选择。
+
+- 新资源建议：`src/ui/remote_min.html` + `remote_min.tis` + 复用 `common.css/remote.css` 局部；`res/inline-sciter.py` 增加生成（页面名/入口由 `ui.rs` 按参数或 option `minimal-ui` 选择）。
+- 界面结构（自顶向下）：
+  1. **信息条**：对端设备名 / 平台 / ID / 登录用户（来源 `handle_peer_info`）；**连接时长计时**（见下）；
+  2. **状态条**（常驻，四态）：语音中 / 录屏中 / 隐私模式 / 输入已锁定——`on` 高亮；
+  3. **操作条**：语音开关、断开连接（仅这两项）。
+- **连接时长**：现 remote 界面无计时元素（已核实）；极简页在 `on_connected` 事件记录 `started_at`，UI 层 1s 定时刷新 `now - started_at`（Sciter `self.timer`）。
+- **状态绑定**：复用现事件通道变量（remote.tis 已具 `recording_enabled / privacy_mode_enabled / input_blocked` 及 name=="recording"/"privacy_mode" 更新分支）：
+  - 语音：绑定 `remote.rs on_voice_call_started/closed`（现仅推送 JS `onVoiceCallStart/Closed`，页面尚未渲染）；新增变量 `voice_on`；
+  - 断开：现有 disconnect API（remote.rs/header 现用逻辑）。
+- 会话开始数据（是否被控 / 状态位）优先由服务端下推（连接层现有字段 `Login{recording, privacy_mode, block_input, restart}` 等）→ 经 `handle_peer_info`/状态事件到 UI。
+
+### 12.4 被控端轻提示（R-10，按建议默认"被控端无窗口 + 托盘/轻提示"）
+
+- 日常无窗口：企业打包即 `--server`（无 UI）；
+- 被连接时：托盘菜单/气泡展示“正在被控制、对端、时长、语音”；是否弹轻浮层由 option `show-conn-banner` 控制（默认开）；
+- 语音被呼入：托盘提示 + （按 option）自动应答或提示；
+- 接受/拒绝流程取消（D-5 默认）；授权= 固定密码 + 可配置 `id-whitelist`。
+
+> 注：若 Q-1/Q-2 评审结论改为“只做被控端、控制端仍用原版”，§12.3 降级为可选项，§12.4 保留。
+
+### 12.5 审计扩展（R-5）详细设计
+
+**通道**（已核实）：
+- 被控/服务侧：`server/connection.rs` 的 `post_conn_audit / post_alarm_audit`（HTTP POST 至 `get_audit_server(api, custom, "conn"/"alarm")`，common.rs:1182）；
+- 控制端会话侧：`ui_session_interface.rs` 的 `send_note()`（异步 POST）。
+
+**审计事件表（新增）**——统一载荷字段：`{action, peer, ts, result, extra}`：
+
+| 事件 | 触发点（建议挂载位置） | 结果字段 |
+|------|------------------------|----------|
+| `voice_on / voice_off` | 控制端 request_voice_call / close_voice_call（ui_session_interface） | ok/err |
+| `record_start / record_stop` | 控制端 record_screen（同上） | ok/err |
+| `privacy_on / privacy_off` | 服务端 turn_on/off_privacy 调用处（server/connection.rs） | 成功/对端拒绝 |
+| `block_input_on / off` | Windows SAS toggle（现有 toggle 链路） | ok/err |
+| `remote_restart` | 控制端 restart_remote_device（ui_session_interface） | ok/err |
+| `password_set` | http_api `/password` 成功分支 | — |
+| `connect_start / connect_close` | 已有 conn 审计（复用，不回造） | 已有 |
+
+**落点**：事件 → 各自侧现有 `post_*_audit`/`send_note` 扩展或新增同名私有函数；保证 type 与 server 侧现有约定不冲突（实现期对照 common.rs `get_audit_server` 的 typ 参数）。
+
+**本地兜底**：审计 POST 失败时追加写 `Config::log_path()/audit.log`（JSON Lines），供业务客户端按需读取；不阻塞主流程。
+
+### 12.6 HTTP API 扩展（联动 GateDesk-api.md 升 v1.5）
+
+| 接口 | 变更 |
+|------|------|
+| `GET /status` | 增加字段：`version`、`in_voice_call`、`recording`、`privacy_mode`、`block_input`（被连会话的实时状态，无会话时 false/null） |
+| `POST /shutdown`（可选） | 优雅停止后台（与 stop-service option 等价），仅本机 + token 鉴权 |
+| `POST /ui`（可选，诊断） | 通知常驻进程打开 `--ui` 完整界面 |
+
+> 凡涉及接口变更必须同步 GateDesk-api.md 变更记录（文档既有维护约定）。
+
+### 12.7 界面语言与资源裁剪（R-3）
+
+- 极简界面文案沿用现有 i18n 机制（`translate`/lang）；
+- 企业版若裁剪全量页面资源（D-2 默认“保留原资源，运行时选极简”）——无资源裁剪工作量，仅新增 `remote_min` 相关。
+
+---
+
+## 13. 变更文件清单（预期）
+
+| 文件 | 改动 | 关联 |
+|------|------|------|
+| `src/core_main.rs` | 路径语义注释化；`--ui` 显式分支；`--server` 自拉起 tray | 12.1 |
+| `src/tray.rs` | 菜单扩展（ID/会话状态/极简界面入口）；hide-tray option | 12.2 |
+| `src/ui/ui.rs` | 页面选择：极简 remote 入口（按参数/option）；`--ui` 说明 | 12.3 |
+| `src/ui/remote_min.html` `.tis`（新增） | 极简会话界面 | 12.3 |
+| `src/ui/inline.rs`（再生成） | 经 `res/inline-sciter.py` 重新生成 | 12.3 |
+| `src/ui/remote.rs` | voice 变量/事件暴露、计时起点 | 12.3 |
+| `src/ui_session_interface.rs` | 语音/录制/重启等操作挂审计；send_note 扩展 | 12.5 |
+| `src/server/connection.rs` | privacy/输入锁定等审计挂点 | 12.5 |
+| `src/http_api.rs` | `/status` 扩展；（可选）/shutdown、/ui | 12.6 |
+| `src/ui/keys.rs` 或等值注册处 | 新增 option 默认键（hide-tray 等） | 12.2 |
+| `GateDesk-api.md` | 接口变更同步（v1.5） | 12.6 |
+| `GateDesk-command.md` | 命令表更新（--ui/--server 语义） | 12.1 |
+| 本文件 | P1-P5 阶段评审更新 | — |
+
+---
+
+## 14. 验证与回归清单（分阶段手测）
+
+**P1 运行形态**
+- [ ] 部署后无窗口（无参之外的默认路径不弹主界面）；`--server` 进程存活；托盘出现；
+- [ ] 业务客户端模拟：spawn → /status 可达 → stop → /status 不可达；
+- [ ] `--ui` 可打开完整界面且功能不回归。
+
+**P2 极简会话界面**
+- [ ] 控制端连接：信息条显示设备名/平台/ID/用户；时长随秒累加；
+- [ ] 语音开/关即时反映到状态条并可闻；
+- [ ] 录制/隐私/输入锁定开启后状态条即时亮起。
+
+**P3 审计**
+- [ ] 上述每项操作后，审计服务器收到事件（时间/对端/结果）；断网时本地 audit.log 落盘且后续可补；
+- [ ] 远程重启执行成功/失败均有记录。
+
+**P4 被控端与接入**
+- [ ] 被控机无窗口被连；托盘/轻提示显示被控中与时长；
+- [ ] 语音被呼入有提示；
+- [ ] 打包后业务客户端全链路（启→连→断开→停）。
+
+**P5 回归**
+- [ ] 原 Sciter 全量功能（`--ui`/`--cm`/`--connect` 原版界面）不回归；
+- [ ] 文档（api/command/本方案）同步更新完毕。
+
