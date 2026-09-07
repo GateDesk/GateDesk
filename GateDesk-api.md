@@ -1,8 +1,8 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.4（2026-09-07）
+> 版本：1.6（2026-09-07）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
-> 维护约定：**修改源码 `gatedesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；变更配置路径/`[options]` 键语义（涉及 `libs/hbb_common/src/config.rs`、`src/ui_interface.rs`）时同步更新「附录 A：GateDesk2.toml 配置文件」。
+> 维护约定：**修改源码 `gatedesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
 ---
 
@@ -287,6 +287,8 @@ netstat -ano | findstr 21120
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-07 | 1.6 | 收敛附录 A 的实现细节，改为面向二次开发的配置约定说明，保留路径、键定义、使用方式与维护纪律，避免过度暴露内部实现 |
+| 2026-09-07 | 1.5 | 细化「附录 A：GateDesk2.toml 配置文件」：补充路径、数据源、缓存、优先级、写入机制、TOML 示例与典型键值说明，便于运维直接维护 |
 | 2026-09-07 | 1.4 | 精简文档：移除与 API/配置无关的编译章节（原 9.1 开发期编译、9.2 发布编译），保留冒烟测试；变更记录按版本降序整理 |
 | 2026-09-07 | 1.3 | 补充「附录 A：GateDesk2.toml 配置文件」：各平台路径、配置项、数据来源与优先级 |
 | 2026-09-03 | 1.2 | 新增 `GET /status`、`POST /password`、`POST /voice`；`/disconnect` 支持 macOS/Linux（SIGTERM）；预检允许 `Content-Type` 请求头 |
@@ -297,60 +299,89 @@ netstat -ano | findstr 21120
 
 ## 附录 A：GateDesk2.toml 配置文件
 
-HTTP API 的鉴权 token（`api-token`）与语音开关（`audio-input`）等配置存放在 **GateDesk2.toml**（即 CONFIG2）的 `[options]` 表。本节说明其路径、结构、数据来源与写入方式。
+HTTP API 的鉴权 token（`api-token`）与语音开关（`audio-input`）等配置，均存放在 **GateDesk2.toml**（即 `Config2`）的 `[options]` 表中。本文档重点说明其位置、结构、数据来源、读取优先级、可维护键值以及常见坑。它是运维 / 部署脚本 / 调试时最重要的配置入口之一。
 
-### A.1 配置文件与位置（不同平台）
+### A.1 配置文件的作用与版本关系
 
-GateDesk 有两个配置文件，均由 `hbb_common::config` 管理：
+GateDesk 维护两份配置文件：
 
-| 文件 | 常量 | 内容 |
+| 文件 | 常量 | 作用 |
 |------|------|------|
-| `GateDesk.toml` | CONFIG1 | 主配置：设备 ID、密钥对等 |
-| `GateDesk2.toml` | CONFIG2 | 安全相关与用户设置：`[options]` 表、socks 凭据、unlock_pin 等 |
+| `GateDesk.toml` | `CONFIG1` | 主配置：设备 ID、密钥对等、核心身份材料 |
+| `GateDesk2.toml` | `CONFIG2` | 二级配置：`[options]` 表、socks 凭据、unlock_pin、用户设置与部分运行参数 |
 
-路径
+
+### A.2 配置文件路径（不同平台）
 
 | 平台 | GateDesk2.toml 完整路径 |
 |------|------------------------|
-| Windows | `%APPDATA%\GateDesk\config\GateDesk2.toml`（即 `C:\Users\<用户名>\AppData\Roaming\GateDesk\config\`） |
+| Windows | `%APPDATA%\GateDesk\config\GateDesk2.toml`（通常为 `C:\Users\<用户名>\AppData\Roaming\GateDesk\config\`） |
 | macOS | `~/Library/Preferences/com.carriez.GateDesk/GateDesk2.toml` |
-| Linux | `$XDG_CONFIG_HOME/GateDesk/GateDesk2.toml`，未设置则 `~/.config/GateDesk/GateDesk2.toml` |
+| Linux | `$XDG_CONFIG_HOME/GateDesk/GateDesk2.toml`，未设置时回退到 `~/.config/GateDesk/GateDesk2.toml` |
 | Android / iOS | 应用沙盒目录（APP_DIR）内 |
 
+如果正在通过脚本部署，建议统一把配置文件路径写成一个“可定位”的变量，并在修改后重启 GateDesk 进程。
+- 修改`GateDesk2.toml` 后，重启后生效；
 
+### A.3 典型 `[options]` 配置项说明
 
-### A.2 数据来源与读取优先级
-
-
-
-HTTP API 侧实际通过 `ui_interface::get_option("api-token")` 读取**启动时缓存的** OPTIONS 内存副本（桌面进程）。因此：
-
-- 外部修改 `GateDesk2.toml` 后需**重启 GateDesk** 才生效；
-- 应用内 `set_option` 的写入路径为：UI 进程内存缓存 → IPC 通知主/服务进程 → `Config::set_option` 更新 `CONFIG2.options` 并落盘。
-
-### A.3 与 HTTP API 相关的 `[options]` 配置项
+下面这些是与 API / 本机配置最相关的键，适合运维/脚本直接检查：
 
 | 键 | 值语义 | 说明 |
 |----|--------|------|
-| `api-token` | 任意字符串（建议高强度随机） | 本地 HTTP API 鉴权 token。`http_api.rs` 通过 `get_option("api-token")` 读取，为空视为未配置（所有接口返回 401 `api-token not configured`）。由部署脚本（`start.sh` / `start-client.sh` / `start-client.ps1`）或手工编辑写入文件，应用自身不写此键。 |
-| `audio-input` | `Y` 启用；空/删除 禁用 | 语音输入总开关。`POST /voice` 写入（`set_option("audio-input", ...)`）；空值会被 `set_option` 从表中移除。 |
+| `api-token` | 任意字符串（建议高强度随机） | 本地 HTTP API 的认证令牌。`http_api.rs` 会读取 `get_option("api-token")`；空值表示“未配置”，所有接口返回 `401` 且响应体为 `{"error":"api-token not configured"}`。一般由脚本或手工编辑配置文件写入。 |
+| `audio-input` | `Y` 表示启用，空字符串或删除表示禁用 | 语音输入总开关。`POST /voice` 会写入此键；值为空时会被 `set_option` 从表里删除。该变更会触发音频服务重启。 |
+| `custom-rendezvous-server` | 服务端地址字符串 | 自定义 rendezvous 服务器。配置可能影响连接路由和注册流程。 |
+| `relay-server` | relay 地址字符串 | 中继服务器配置，通常用于穿透/中继场景。 |
+| `api-server` | API 服务器地址 | 与 GateDesk 业务后台或网关通信相关。 |
+| `stop-service` | `Y`/空字符串 | 控制后端服务运行状态。 |
+| `disable-udp` | `Y`/`N` 或空 | UDP 能力开关。 |
+| `whitelist` / `id-whitelist` | 条件字符串 | 访问控制相关配置，按实际应用判断。 |
 
-其余 `[options]` 键为 GateDesk UI 设置项，本节不展开，见 `config.rs` 的 `default_options()` 与 `keys.rs`。
+> 说明：`[options]` 里并非只有这几个键。它几乎包含 GateDesk 的大部分用户设置，因为 `Config2.options` 是统一键值表；如果需要看完整清单，可参考 `config.rs` 中的 `default_options()` 与 `keys.rs`。
 
-### A.4 文件结构示例与 TOML 注意事项
+### A.6 文件结构示例与 TOML 写法
+
+最常见的写法示例如下：
 
 ```toml
 [options]
-api-token = 'k7Fp…（随机串）'
+# ==============================
+# 本机 HTTP API 鉴权
+# ==============================
+api-token = 'replace_with_strong_random_token'
+
+# ==============================
+# 语音输入开关
+# 'Y' = 启用, 空字符串 = 禁用
+# ==============================
 audio-input = 'Y'
+
+# ==============================
+# 远程连接 / 中继相关
+# ==============================
+custom-rendezvous-server = 'rs-ny.rustdesk.com'
+relay-server = '127.0.0.1:21117'
+api-server = ''
+
+# ==============================
+# 服务状态相关
+# ==============================
+stop-service = ''
+disable-udp = ''
+allow-always-software-render = ''
+
+# ==============================
+# 访问控制 / 安全相关
+# ==============================
+whitelist = ''
+id-whitelist = ''
+
+# ==============================
+# 其他常见配置项（按实际需要写）
+# ==============================
+enable-lan-discovery = ''
+allow-insecure-tls-fallback = ''
 ```
-
-- 键名使用连字符（`api-token`），字符串建议用**单引号**字面量包裹。
-- 文件已有 `[options]` 表头时，直接在其中**追加/修改键行**，**绝不新增第二个 `[options]` 表头**（重复表头会导致 TOML 解析失败，配置读取异常）。
-- 值含特殊字符时使用单引号 `'...'`（TOML 字面量字符串，不转义）。
-- 修改后需重启 GateDesk（配置在启动时缓存）。
-
-
-
 
 
