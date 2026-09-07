@@ -386,7 +386,7 @@ def ffi_bindgen_function_refactor():
         content = content.replace('ffi.Pointer<NativeBool>', 'ffi.Bool')
         content = content.replace('ffi.Bool', 'bool')
         content = re.sub(
-            r'ffi\.NativeFunction<.*?>>',
+            r'ffi\s*\.\s*NativeFunction<.*?>>',
             lambda match: match.group(0).replace('bool', 'ffi.Bool'),
             content,
             flags=re.DOTALL)
@@ -405,9 +405,9 @@ def ffi_bindgen_function_refactor():
         content = content.replace(
             'int new_dart_opaque(\n    Dart_Handle handle,',
             'int new_dart_opaque(\n    Object handle,')
-        content = content.replace(
-            'return _new_dart_opaque(\n      handle,\n    );',
-            'return _new_dart_opaque(\n      handle as Dart_Handle,\n    );')
+        # sanitize stale casts written by older refactor runs; Dart_Handle has no
+        # public definition in ffigen output, only the private _Dart_Handle.
+        content = content.replace('handle as Dart_Handle,', 'handle,')
         content = content.replace(
             'external ffi.Pointer<ffi.Int> ptr;\n\n  @ffi.Int()\n  external int len;\n}\n\nfinal class wire_int_32_list',
             'external ffi.Pointer<ffi.Uint8> ptr;\n\n  @ffi.Int()\n  external int len;\n}\n\nfinal class wire_int_32_list')
