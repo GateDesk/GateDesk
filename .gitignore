@@ -58,3 +58,11 @@ libsciter.dylib
 flutter/web/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/
+logs/
+# build artifacts (flutter packaging outputs)
+gatedesk-portable-*.zip
+gatedesk-*-install.exe
+gatedesk_portable.exe
+rustdesk_portable.exe
+
+

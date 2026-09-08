@@ -69,8 +69,9 @@ Start-Process -FilePath "gatedesk\target\release\gatedesk.exe" -WorkingDirectory
 .\gatedesk.exe --install-service               # 安装系统服务
 .\gatedesk.exe --uninstall-service             # 卸载系统服务
 .\gatedesk.exe --service                       # 以服务方式运行
-.\gatedesk.exe --server                        # 启动服务进程（主 IPC）
-.\gatedesk.exe --tray                          # 启动托盘
+.\gatedesk.exe --server                        # 常驻后台服务（企业嵌入默认形态：无窗口，提供 http_api 与被控能力）
+.\gatedesk.exe --tray                          # 启动托盘（--server 下自动拉起；hide-tray=Y 可关）
+.\gatedesk.exe --ui                            # 显式打开完整主界面（等价无参启动，诊断/首配用）
 .\gatedesk.exe --update                        # 检查更新
 .\gatedesk.exe --noinstall                     # 便携模式（不安装）
 ```
@@ -111,6 +112,7 @@ gatedesk://connection/new/<id>?password=xxx&relay=true
 - 当前为便携运行（未 `--install`），配置管理类命令会因 `is_installed()` 为 `false` 被拒。
 - `--get-id` / `--version` 等查询命令不受安装状态限制。
 - release 版为 Windows GUI 子系统程序（`#![windows_subsystem = "windows"]`），`println!` 输出必须通过管道或重定向才能看到。
+
 
 
 

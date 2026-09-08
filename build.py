@@ -23,7 +23,7 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 windows = platform.platform().startswith('Windows')
 osx = platform.platform().startswith(
     'Darwin') or platform.platform().startswith("macOS")
-hbb_name = 'rustdesk' + ('.exe' if windows else '')
+hbb_name = 'gatedesk' + ('.exe' if windows else '')
 exe_path = 'target/release/' + hbb_name
 if windows:
     win_arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
@@ -976,7 +976,28 @@ def build_flutter_arch_manjaro(version, features):
     system2('HBB=`pwd`/.. FLUTTER=1 makepkg -f')
 
 
-def build_flutter_windows(version, features, skip_portable_pack):
+def pack_portable_zip(version: str, src_dir: str) -> str:
+    """Zip a flutter Release bundle as a green portable package.
+
+    The archive mirrors the bundle layout (gatedesk.exe, librustdesk.dll,
+    data/, plugin dlls) so unzipping it into any folder yields a runnable
+    client without installation.
+    """
+    import zipfile
+
+    out = f'gatedesk-portable-{version}.zip'
+    if os.path.exists(out):
+        os.unlink(out)
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(src_dir):
+            for f in files:
+                full = os.path.join(root, f)
+                zf.write(full, os.path.relpath(full, src_dir).replace('\\', '/'))
+    print(f'output location: {os.path.abspath(out)}')
+    return out
+
+
+def build_flutter_windows(version, features, skip_portable_pack, portable=False):
     if not skip_cargo:
         system2(f'cargo build --locked --features {features} --lib --release')
         if not os.path.exists("target/release/librustdesk.dll"):
@@ -988,24 +1009,45 @@ def build_flutter_windows(version, features, skip_portable_pack):
     os.chdir('..')
     shutil.copy2('target/release/deps/dylib_virtual_display.dll',
                  flutter_build_dir_2)
+    if portable:
+        # Green/portable zip: mirror of the release bundle, unzip and run.
+        pack_portable_zip(version, flutter_build_dir_2)
+        # Single-file self-extracting portable exe. generate.py compresses the
+        # release bundle into data.bin and rebuilds rustdesk-portable-packer so
+        # the data is embedded via include_bytes!. Naming the stub '-portable-'
+        # (NOT '*install.exe') makes it launch the app directly instead of
+        # running the installer wizard.
+        os.chdir('libs/portable')
+        system2('pip3 install -r requirements.txt')
+        system2(
+            f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
+        os.chdir('../..')
+        portable_exe = f'./gatedesk-portable-{version}.exe'
+        if os.path.exists(portable_exe):
+            os.unlink(portable_exe)
+        os.replace('./target/release/rustdesk-portable-packer.exe', portable_exe)
+        print(f'output location: {os.path.abspath(portable_exe)}')
+        return
     if skip_portable_pack:
         return
     os.chdir('libs/portable')
     system2('pip3 install -r requirements.txt')
     system2(
-        f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/rustdesk.exe')
+        f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
     os.chdir('../..')
-    if os.path.exists('./rustdesk_portable.exe'):
+    if os.path.exists('./gatedesk_portable.exe'):
         os.replace('./target/release/rustdesk-portable-packer.exe',
-                   './rustdesk_portable.exe')
+                   './gatedesk_portable.exe')
     else:
         os.rename('./target/release/rustdesk-portable-packer.exe',
-                  './rustdesk_portable.exe')
+                  './gatedesk_portable.exe')
     print(
-        f'output location: {os.path.abspath(os.curdir)}/rustdesk_portable.exe')
-    os.rename('./rustdesk_portable.exe', f'./rustdesk-{version}-install.exe')
+        f'output location: {os.path.abspath(os.curdir)}/gatedesk_portable.exe')
+    # os.replace overwrites a stale output from a previous build;
+    # os.rename fails with WinError 183 when the target already exists.
+    os.replace('./gatedesk_portable.exe', f'./gatedesk-{version}-install.exe')
     print(
-        f'output location: {os.path.abspath(os.curdir)}/rustdesk-{version}-install.exe')
+        f'output location: {os.path.abspath(os.curdir)}/gatedesk-{version}-install.exe')
 
 
 def main():
@@ -1052,27 +1094,28 @@ def main():
         os.chdir('../../..')
 
         if flutter:
-            build_flutter_windows(version, features, args.skip_portable_pack)
+            build_flutter_windows(version, features, args.skip_portable_pack,
+                                  args.portable)
             return
         system2('cargo build --locked --release --features ' + features)
-        # system2('upx.exe target/release/rustdesk.exe')
-        system2('mv target/release/rustdesk.exe target/release/RustDesk.exe')
+        # system2('upx.exe target/release/gatedesk.exe')
+        system2('mv target/release/gatedesk.exe target/release/GateDesk.exe')
         pa = os.environ.get('P')
         if pa:
             # https://certera.com/kb/tutorial-guide-for-safenet-authentication-client-for-code-signing/
             system2(
                 f'signtool sign /a /v /p {pa} /debug /f .\\cert.pfx /t http://timestamp.digicert.com  '
-                'target\\release\\rustdesk.exe')
+                'target\\release\\GateDesk.exe')
         else:
             print('Not signed')
         os.makedirs(res_dir, exist_ok=True)
         system2(
-            f'cp -rf target/release/RustDesk.exe {res_dir}')
+            f'cp -rf target/release/GateDesk.exe {res_dir}')
         os.chdir('libs/portable')
         system2('pip3 install -r requirements.txt')
         system2(
-            f'python3 ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/rustdesk-{version}-win7-install.exe')
-        system2(f'mv ../../{res_dir}/rustdesk-{version}-win7-install.exe ../..')
+            f'python3 ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/gatedesk-{version}-win7-install.exe')
+        system2(f'mv ../../{res_dir}/gatedesk-{version}-win7-install.exe ../..')
     elif os.path.isfile('/usr/bin/pacman'):
         # pacman -S -needed base-devel
         system2("sed -i 's/pkgver=.*/pkgver=%s/g' res/PKGBUILD" % version)
@@ -1199,3 +1242,8 @@ def md5_file_folder(base_dir):
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
