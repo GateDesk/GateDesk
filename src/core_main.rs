@@ -202,6 +202,7 @@ pub fn core_main() -> Option<Vec<String>> {
             hbb_common::config::PeerConfig::preload_peers();
         }
         std::thread::spawn(move || crate::start_server(false, no_server));
+        crate::http_api::start();
     } else {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         // Root CLI management commands must talk to the user `--server` main IPC.
@@ -395,6 +396,7 @@ pub fn core_main() -> Option<Vec<String>> {
             return None;
         } else if args[0] == "--server" {
             log::info!("start --server with user {}", crate::username());
+            crate::http_api::start();
             #[cfg(target_os = "linux")]
             {
                 hbb_common::allow_err!(crate::platform::check_autostart_config());
@@ -956,3 +958,4 @@ fn is_quick_support_exe(exe: &str) -> bool {
     let exe = exe.to_lowercase();
     exe.contains("-qs-") || exe.contains("-qs.exe") || exe.contains("_qs.exe")
 }
+

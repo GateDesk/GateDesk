@@ -51,6 +51,7 @@ screencapturekit = ["cpal/screencapturekit"]
 
 [dependencies]
 async-trait = "0.1"
+tiny_http = "0.12"
 scrap = { path = "libs/scrap", features = ["wayland"] }
 hbb_common = { path = "libs/hbb_common" }
 serde_derive = "1.0"
@@ -237,7 +238,7 @@ docopt = "1.1"
 
 [package.metadata.bundle]
 name = "GateDesk"
-identifier = "com.carriez.rustdesk"
+identifier = "com.carriez.gatedesk"
 icon = ["res/32x32.png", "res/128x128.png", "res/128x128@2x.png"]
 osx_minimum_system_version = "10.14"
 
@@ -251,5 +252,7 @@ strip = true
 rpath = true
 
 [profile.dev]
-debug = "line-tables-only"
+debug = 1
+
+
 
