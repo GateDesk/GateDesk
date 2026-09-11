@@ -2481,6 +2481,17 @@ impl<T: InvokeUiSession> Remote<T> {
             v.video_sender.send(MediaData::RecordScreen(start)).ok();
         }
         self.handler.update_record_status(start);
+        // Enterprise audit: this is the deduplicated transition point
+        // (`last_record_state` above). Hooking `Session::record_screen` instead
+        // would also fire on every window resize, because the UI re-issues
+        // record_screen(true/false) from `setDisplay` / the size handler.
+        crate::audit::record(
+            if start { "record.start" } else { "record.stop" },
+            "operator",
+            self.handler.lc.read().unwrap().session_id,
+            "ok",
+            serde_json::json!({}),
+        );
         // update remote
         let mut misc = Misc::new();
         misc.set_client_record_status(start);
@@ -2543,3 +2554,4 @@ impl Drop for VideoThread {
         *self.discard_queue.write().unwrap() = true;
     }
 }
+

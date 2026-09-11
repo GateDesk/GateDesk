@@ -389,6 +389,35 @@ impl<T: InvokeUiSession> Session<T> {
         }
         if let Some(msg) = msg {
             self.send(Data::Message(msg));
+            // Enterprise audit: high-risk session toggles performed by the operator.
+            let sid = self.lc.read().unwrap().session_id;
+            match name.as_str() {
+                "block-input" => crate::audit::record(
+                    "block_input.on",
+                    "operator",
+                    sid,
+                    "ok",
+                    serde_json::json!({}),
+                ),
+                "unblock-input" => crate::audit::record(
+                    "block_input.off",
+                    "operator",
+                    sid,
+                    "ok",
+                    serde_json::json!({}),
+                ),
+                "privacy-mode" => {
+                    let on = self.get_toggle_option("privacy-mode".to_owned());
+                    crate::audit::record(
+                        if on { "privacy.on" } else { "privacy.off" },
+                        "operator",
+                        sid,
+                        "ok",
+                        serde_json::json!({}),
+                    );
+                }
+                _ => {}
+            }
         }
     }
 
@@ -402,6 +431,13 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
+        crate::audit::record(
+            if on { "privacy.on" } else { "privacy.off" },
+            "operator",
+            self.lc.read().unwrap().session_id,
+            "ok",
+            serde_json::json!({}),
+        );
     }
 
     pub fn get_toggle_option(&self, name: String) -> bool {
@@ -563,10 +599,20 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn restart_remote_device(&self) {
-        let mut lc = self.lc.write().unwrap();
-        lc.mark_restarting_remote_device();
-        let msg = lc.restart_remote_device();
-        self.send(Data::Message(msg));
+        let sid = {
+            let mut lc = self.lc.write().unwrap();
+            lc.mark_restarting_remote_device();
+            let msg = lc.restart_remote_device();
+            self.send(Data::Message(msg));
+            lc.session_id
+        };
+        crate::audit::record(
+            "remote.restart",
+            "operator",
+            sid,
+            "ok",
+            serde_json::json!({}),
+        );
     }
 
     pub fn get_audit_server(&self, typ: String) -> String {
@@ -1588,11 +1634,25 @@ impl<T: InvokeUiSession> Session<T> {
         #[cfg(target_os = "linux")]
         std::thread::spawn(crate::ipc::start_pa);
         self.send(Data::NewVoiceCall);
+        crate::audit::record(
+            "voice.on",
+            "operator",
+            self.lc.read().unwrap().session_id,
+            "ok",
+            serde_json::json!({}),
+        );
     }
 
     #[inline]
     pub fn close_voice_call(&self) {
         self.send(Data::CloseVoiceCall);
+        crate::audit::record(
+            "voice.off",
+            "operator",
+            self.lc.read().unwrap().session_id,
+            "ok",
+            serde_json::json!({}),
+        );
     }
 
     pub fn send_selected_session_id(&self, sid: String) {
@@ -2067,3 +2127,5 @@ async fn send_note(url: String, id: String, sid: u64, note: String) {
     let body = serde_json::json!({ "id": id, "session_id": sid, "note": note });
     allow_err!(crate::post_request(url, body.to_string(), "").await);
 }
+
+

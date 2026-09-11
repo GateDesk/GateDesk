@@ -1,4 +1,5 @@
 use hbb_common::log;
+use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -7,8 +8,22 @@ use tiny_http::{Header, Method, Request, Response, Server};
 /// - Listens on 127.0.0.1 only (never 0.0.0.0).
 /// - Requires token: `Authorization: Bearer <token>` header or `?token=<token>` query.
 /// - Token is read from config option `api-token` (GateDesk2.toml `[options]`).
-/// - CORS: `Access-Control-Allow-Origin: *` so business web pages can fetch it.
+/// - Host check: only `localhost` / `127.0.0.1` Host headers are accepted
+///   (DNS-rebinding protection).
+/// - CORS: `Access-Control-Allow-Origin` is echoed only for trusted origins — local
+///   origins (localhost / 127.0.0.1, any port) and the origins listed in the
+///   `api-cors-origin` config option (comma separated). Other origins are rejected
+///   with 403 and get no CORS header.
 const PORT: u16 = 21120;
+
+/// Unified cap for request bodies (bytes). /password and /voice payloads are small.
+const MAX_BODY_BYTES: usize = 1024;
+
+thread_local! {
+    /// Origin allowed for the current request (empty when the request carried no
+    /// Origin header or was rejected); drives the per-response CORS header.
+    static CORS_ORIGIN: RefCell<String> = RefCell::new(String::new());
+}
 
 /// (target id, pid) of connect-session processes spawned by `POST /connect`.
 /// `POST /disconnect` closes only these windows, never the main UI process.
@@ -18,7 +33,30 @@ fn connect_sessions() -> &'static Mutex<Vec<(String, u32)>> {
     CONNECT_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+/// The config file holds `api-token` in `[options]`; tighten its permissions to
+/// owner-only on Unix so other local users cannot read the token.
+#[cfg(unix)]
+fn tighten_config_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let path = hbb_common::config::Config::file();
+    match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => log::info!(
+            "config file permissions tightened to 0600: {}",
+            path.display()
+        ),
+        Err(e) => log::debug!(
+            "could not tighten config file permissions {}: {}",
+            path.display(),
+            e
+        ),
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_config_permissions() {}
+
 pub fn start() {
+    tighten_config_permissions();
     std::thread::spawn(|| {
         let addr = format!("127.0.0.1:{}", PORT);
         let server = match Server::http(&addr) {
@@ -43,8 +81,11 @@ fn header(k: &str, v: &str) -> Option<Header> {
 
 fn respond(request: Request, status: u16, body: String) {
     let mut response = Response::from_string(body).with_status_code(status);
-    if let Some(h) = header("Access-Control-Allow-Origin", "*") {
-        response = response.with_header(h);
+    let allowed = CORS_ORIGIN.with(|o| o.borrow().clone());
+    if !allowed.is_empty() {
+        if let Some(h) = header("Access-Control-Allow-Origin", &allowed) {
+            response = response.with_header(h);
+        }
     }
     if let Some(h) = header("Content-Type", "application/json; charset=utf-8") {
         response = response.with_header(h);
@@ -67,6 +108,77 @@ fn extract_token(request: &Request, query: &str) -> String {
         }
     }
     "".to_owned()
+}
+
+/// First value of a request header, if present.
+fn request_header<'a>(request: &'a Request, key: &'static str) -> Option<&'a str> {
+    request
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv(key))
+        .map(|h| h.value.as_str())
+}
+
+/// The API binds 127.0.0.1 only; reject requests whose Host header is not
+/// localhost/127.0.0.1 so a page served from another site cannot re-point its
+/// requests at this API (DNS rebinding).
+fn host_allowed(request: &Request) -> bool {
+    let Some(host) = request_header(request, "Host") else {
+        return false;
+    };
+    let host_port = host.split('/').next().unwrap_or("").trim();
+    let host_only = host_port
+        .rsplit_once(':')
+        .map(|(h, p)| {
+            if p.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                host_port
+            }
+        })
+        .unwrap_or(host_port);
+    let host_only = host_only.trim_matches(|c| c == '[' || c == ']');
+    host_only.eq_ignore_ascii_case("localhost") || host_only.eq_ignore_ascii_case("127.0.0.1")
+}
+
+/// Whether a browser Origin header is trusted: a local origin (localhost /
+/// 127.0.0.1, any port/scheme) or one explicitly listed in `[options]`
+/// api-cors-origin (comma separated, e.g. http://192.168.1.10:3000 for the
+/// GateDeskWeb business pages served from another address).
+fn origin_allowed(origin: &str) -> bool {
+    let lower = origin.to_ascii_lowercase();
+    let Some(scheme_rest) = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = scheme_rest
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    let host_only = authority
+        .rsplit_once(':')
+        .map(|(h, p)| {
+            if p.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                authority
+            }
+        })
+        .unwrap_or(authority);
+    let host_only = host_only.trim_matches(|c| c == '[' || c == ']');
+    if host_only.eq_ignore_ascii_case("localhost") || host_only.eq_ignore_ascii_case("127.0.0.1") {
+        return true;
+    }
+    let cfg = crate::ui_interface::get_option("api-cors-origin");
+    cfg.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .any(|s| s == lower)
 }
 
 fn query_param(query: &str, key: &str) -> String {
@@ -178,19 +290,44 @@ fn handle_connect(request: Request, query: &str) {
             Ok(child) => {
                 log::info!("http api connect spawned pid {} args {:?}", child.id(), args);
                 connect_sessions().lock().unwrap().push((id.clone(), child.id()));
+                crate::audit::record(
+                    "connect.start",
+                    "operator",
+                    0,
+                    "ok",
+                    serde_json::json!({"target_id": id.clone(), "relay": query_param(query, "relay") == "true"}),
+                );
                 respond(request, 200, format!("{{\"ok\":true,\"id\":\"{}\"}}", id))
             }
-            Err(e) => respond(
+            Err(e) => {
+                crate::audit::record(
+                    "connect.start",
+                    "operator",
+                    0,
+                    "err",
+                    serde_json::json!({"target_id": id.clone(), "error": format!("{}", e)}),
+                );
+                respond(
+                    request,
+                    500,
+                    format!("{{\"error\":\"failed to launch: {}\"}}", e),
+                )
+            }
+        },
+        Err(e) => {
+            crate::audit::record(
+                "connect.start",
+                "operator",
+                0,
+                "err",
+                serde_json::json!({"error": format!("{}", e)}),
+            );
+            respond(
                 request,
                 500,
-                format!("{{\"error\":\"failed to launch: {}\"}}", e),
-            ),
-        },
-        Err(e) => respond(
-            request,
-            500,
-            format!("{{\"error\":\"failed to locate exe: {}\"}}", e),
-        ),
+                format!("{{\"error\":\"failed to locate exe: {}\"}}", e),
+            )
+        }
     }
 }
 
@@ -265,6 +402,15 @@ fn disconnect_api_sessions() -> usize {
 
 fn handle_disconnect(request: Request) {
     let closed = disconnect_api_sessions();
+    if closed > 0 {
+        crate::audit::record(
+            "connect.close",
+            "operator",
+            0,
+            "ok",
+            serde_json::json!({"closed": closed}),
+        );
+    }
     respond(
         request,
         200,
@@ -278,7 +424,7 @@ fn handle_disconnect(request: Request) {
 /// caller-chosen value; the page should re-call this endpoint with a fresh
 /// random value after each session to rotate the credential.
 fn handle_password(mut request: Request) {
-    let body = read_body(&mut request, 1024);
+    let body = read_body(&mut request, MAX_BODY_BYTES);
     let password = json_field(&body, "password").unwrap_or_default();
     if password.is_empty() || password.len() > 64 {
         respond(
@@ -290,8 +436,26 @@ fn handle_password(mut request: Request) {
     }
     let ok = crate::ui_interface::set_permanent_password_with_result(password);
     if ok {
+        // Granting access: the customer (this machine) explicitly enabled
+        // "assistable" by provisioning a connection credential (authorization
+        // method A). Keep GateDesk's native permanent-password semantics; the
+        // caller rotates the credential after each session.
+        crate::audit::record(
+            "auth.grant",
+            "customer",
+            0,
+            "ok",
+            serde_json::json!({"method": "password"}),
+        );
         respond(request, 200, "{\"ok\":true}".to_owned());
     } else {
+        crate::audit::record(
+            "auth.grant",
+            "customer",
+            0,
+            "err",
+            serde_json::json!({"method": "password", "error": "failed to set password"}),
+        );
         respond(
             request,
             500,
@@ -305,13 +469,20 @@ fn handle_password(mut request: Request) {
 /// session-level toggle needs a live in-process `Session` handle, which the
 /// process-spawn connect model does not hold.
 fn handle_voice(mut request: Request) {
-    let body = read_body(&mut request, 1024);
+    let body = read_body(&mut request, MAX_BODY_BYTES);
     match json_field(&body, "enabled") {
         Some(v) if v == "true" || v == "false" => {
             let on = v == "true";
             crate::ui_interface::set_option(
                 "audio-input".to_owned(),
                 if on { "Y" } else { "" }.to_owned(),
+            );
+            crate::audit::record(
+                if on { "voice.on" } else { "voice.off" },
+                "operator",
+                0,
+                "ok",
+                serde_json::json!({"method": "http-api"}),
             );
             respond(request, 200, format!("{{\"ok\":true,\"enabled\":{}}}", on));
         }
@@ -330,6 +501,7 @@ fn handle_voice(mut request: Request) {
 /// the PoC.
 fn handle_status(request: Request) {
     let online = crate::ui_interface::get_connect_status().status_num != 0;
+    let assistable = crate::ui_interface::is_local_permanent_password_set();
     let mut sessions = connect_sessions().lock().unwrap();
     sessions.retain(|(_, pid)| pid_alive(*pid));
     let peer_id = sessions.last().map(|(id, _)| id.clone());
@@ -339,34 +511,66 @@ fn handle_status(request: Request) {
             request,
             200,
             format!(
-                "{{\"online\":{},\"in_session\":true,\"peer_id\":\"{}\"}}",
-                online, id
+                "{{\"online\":{},\"in_session\":true,\"peer_id\":\"{}\",\"assistable\":{}}}",
+                online, id, assistable
             ),
         ),
         None => respond(
             request,
             200,
-            format!("{{\"online\":{},\"in_session\":false,\"peer_id\":null}}", online),
+            format!(
+                "{{\"online\":{},\"in_session\":false,\"peer_id\":null,\"assistable\":{}}}",
+                online, assistable
+            ),
         ),
     }
 }
 
 fn handle(request: Request) {
+    // --- local API hardening: Host check, CORS, body-size cap ---------------
+    // This thread may have served a previous request; its origin must not leak
+    // into a response that is produced before CORS_ORIGIN is assigned below
+    // (e.g. the 403 paths).
+    CORS_ORIGIN.with(|o| o.borrow_mut().clear());
+    // Bound to 127.0.0.1; still refuse foreign Host headers (DNS rebinding).
+    if !host_allowed(&request) {
+        respond(request, 403, "{\"error\":\"host not allowed\"}".to_owned());
+        return;
+    }
+    let origin = request_header(&request, "Origin").unwrap_or("").trim().to_owned();
+    if !origin.is_empty() && !origin_allowed(&origin) {
+        respond(request, 403, "{\"error\":\"origin not allowed\"}".to_owned());
+        return;
+    }
+    CORS_ORIGIN.with(|o| *o.borrow_mut() = origin);
+    // Unified request-body cap.
+    if let Some(len) = request_header(&request, "Content-Length") {
+        if let Ok(n) = len.trim().parse::<usize>() {
+            if n > MAX_BODY_BYTES {
+                respond(request, 413, "{\"error\":\"payload too large\"}".to_owned());
+                return;
+            }
+        }
+    }
+
     // CORS preflight
     if request.method() == &Method::Options {
-        let response = Response::empty(204);
-        let response = match header("Access-Control-Allow-Origin", "*") {
-            Some(h) => response.with_header(h),
-            None => response,
-        };
-        let response = match header("Access-Control-Allow-Methods", "GET, POST, OPTIONS") {
-            Some(h) => response.with_header(h),
-            None => response,
-        };
-        let response = match header("Access-Control-Allow-Headers", "Authorization, Content-Type") {
-            Some(h) => response.with_header(h),
-            None => response,
-        };
+        let mut response = Response::empty(204);
+        let allowed = CORS_ORIGIN.with(|o| o.borrow().clone());
+        if allowed.is_empty() {
+            let _ = request.respond(response);
+            return;
+        }
+        for (k, v) in [
+            ("Access-Control-Allow-Origin", allowed.as_str()),
+            ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ("Access-Control-Allow-Headers", "Authorization, Content-Type"),
+            ("Access-Control-Max-Age", "600"),
+        ] {
+            if let Some(h) = header(k, v) {
+                response = response.with_header(h);
+            }
+        }
         let _ = request.respond(response);
         return;
     }
@@ -418,6 +622,12 @@ fn handle(request: Request) {
         }
     }
 }
+
+
+
+
+
+
 
 
 

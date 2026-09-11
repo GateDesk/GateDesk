@@ -93,6 +93,9 @@ function editOSPassword(login=false) {
 }
 
 var recording = false;
+// Session high-risk operation states driving the four-state status strip (P4).
+var voice_active = false;
+var privacy_active = false;
 
 class Header: Reactor.Component {
     this var conn_note = "";
@@ -152,6 +155,12 @@ class Header: Reactor.Component {
             <span #display>{svg_display}</span>
             <span #keyboard>{svg_keyboard}</span>
             {recording_enabled && show_recording_button ? <span #recording>{recording ? svg_recording_on : svg_recording_off}</span> : ""}
+            <span #status-bar>
+                <span #st-voice .dot class={voice_active ? "on" : ""} title="Voice"></span>
+                <span #st-rec .dot class={recording ? "on" : ""} title="Recording"></span>
+                <span #st-privacy .dot class={privacy_active ? "on" : ""} title="Privacy mode"></span>
+                <span #st-block .dot class={input_blocked ? "on" : ""} title="Block user input"></span>
+            </span>
             {this.renderKeyboardPop()}
             {this.renderDisplayPop()}
             {this.renderActionPop()}
@@ -404,6 +413,7 @@ class Header: Reactor.Component {
             input_blocked = false;
             $(#block-input).text = translate("Block user input");
         }
+        refreshStateDots();
     }
 
     event click $(menu#display-options li) (_, me) {
@@ -588,14 +598,41 @@ function updatePrivacyMode() {
         } else {
             var value = handler.get_toggle_option("privacy-mode");
             el.attributes.toggleClass("selected", value);
+            privacy_active = value;
             var el = $(li#block-input);
             if (el) {
                 el.state.disabled = value;
             }
         }
     }
+    refreshStateDots();
 }
 handler.updatePrivacyMode = updatePrivacyMode;
+
+function setDot(id, on) {
+    var el = $(id);
+    if (el) el.attributes.toggleClass("on", on);
+}
+
+// Four-state status strip refresh: voice / recording / privacy / input lock.
+function refreshStateDots() {
+    setDot("#st-voice", voice_active);
+    setDot("#st-rec", recording);
+    setDot("#st-privacy", privacy_active);
+    setDot("#st-block", input_blocked);
+}
+
+function onVoiceCallStart() {
+    voice_active = true;
+    refreshStateDots();
+    if (typeof header != "undefined") header.update();
+}
+
+function onVoiceCallClosed() {
+    voice_active = false;
+    refreshStateDots();
+    if (typeof header != "undefined") header.update();
+}
 
 function togglePrivacyMode(privacy_id) {
     var supported = handler.is_privacy_mode_supported();
@@ -629,16 +666,18 @@ function toggleI444(name) {
     toggleMenuState();
 }
 
-handler.updateBlockInputState = function(input_blocked) {
-    if (!input_blocked) {
-        handler.toggle_option("block-input");
-        input_blocked = true;
-        $(#block-input).text = translate("Unblock user input");
-    } else {
-        handler.toggle_option("unblock-input");
-        input_blocked = false;
-        $(#block-input).text = translate("Block user input");
+// Server-confirmed block/unblock state. `on` is authoritative, so this must not
+// re-issue a toggle: the old code toggled the opposite option, which flipped the
+// state back and, when a request was denied, looped on the failure notification.
+// Note the parameter must not shadow the global `input_blocked` (remote.tis),
+// otherwise the four-state strip never reflects the confirmed state.
+handler.updateBlockInputState = function(on) {
+    input_blocked = on;
+    var el = $(#block-input);
+    if (el) {
+        el.text = translate(on ? "Unblock user input" : "Block user input");
     }
+    refreshStateDots();
 }
 
 handler.switchDisplay = function(i) {
@@ -719,4 +758,8 @@ handler.setConnectionType = function(secured, direct, stream_type) {
 handler.updateRecordStatus = function(status) {
     recording = status;
     header.update();
+    refreshStateDots();
 }
+
+
+

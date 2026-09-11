@@ -4832,9 +4832,23 @@ impl Connection {
                 match q {
                     BoolOption::Yes => {
                         self.tx_input.send(MessageInput::BlockOn).ok();
+                        crate::audit::record(
+                            "block_input.on",
+                            "operator",
+                            self.lr.session_id,
+                            "ok",
+                            serde_json::json!({}),
+                        );
                     }
                     BoolOption::No => {
                         self.tx_input.send(MessageInput::BlockOff).ok();
+                        crate::audit::record(
+                            "block_input.off",
+                            "operator",
+                            self.lr.session_id,
+                            "ok",
+                            serde_json::json!({}),
+                        );
                     }
                     _ => {}
                 }
@@ -4845,6 +4859,17 @@ impl Connection {
                     } else {
                         back_notification::BlockInputState::BlkOffFailed
                     };
+                    crate::audit::record(
+                        if q == BoolOption::Yes {
+                            "block_input.on"
+                        } else {
+                            "block_input.off"
+                        },
+                        "operator",
+                        self.lr.session_id,
+                        "denied",
+                        serde_json::json!({"reason": "no permission"}),
+                    );
                     if let Some(tx) = &self.inner.tx {
                         Self::send_block_input_error(tx, state, "No permission".to_string());
                     }
@@ -4905,6 +4930,13 @@ impl Connection {
 
     async fn turn_on_privacy(&mut self, impl_key: String) {
         if !self.is_authed_remote_conn() || !self.privacy_mode {
+            crate::audit::record(
+                "privacy.on",
+                "operator",
+                self.lr.session_id,
+                "denied",
+                serde_json::json!({"reason": "no permission"}),
+            );
             let msg_out = crate::common::make_privacy_mode_msg(
                 back_notification::PrivacyModeState::PrvOnFailedDenied,
                 impl_key,
@@ -4913,6 +4945,13 @@ impl Connection {
             return;
         }
 
+        crate::audit::record(
+            "privacy.on",
+            "operator",
+            self.lr.session_id,
+            "ok",
+            serde_json::json!({}),
+        );
         let msg_out = if !privacy_mode::is_privacy_mode_supported() {
             crate::common::make_privacy_mode_msg_with_details(
                 back_notification::PrivacyModeState::PrvNotSupported,
@@ -4993,6 +5032,13 @@ impl Connection {
     }
 
     async fn turn_off_privacy(&mut self, impl_key: String) {
+        crate::audit::record(
+            "privacy.off",
+            "operator",
+            self.lr.session_id,
+            "ok",
+            serde_json::json!({}),
+        );
         let msg_out = if !privacy_mode::is_privacy_mode_supported() {
             crate::common::make_privacy_mode_msg_with_details(
                 back_notification::PrivacyModeState::PrvNotSupported,
@@ -7482,3 +7528,4 @@ mod test {
         );
     }
 }
+

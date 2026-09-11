@@ -95,3 +95,34 @@ button:disabled {
   opacity: 0.3;
 }
 
+/* Four-state session status strip (P4): voice / recording / privacy / input lock */
+#status-bar {
+  flow: horizontal;
+  border-spacing: 2px;
+  margin: 4px 6px 0 0;
+  vertical-align: middle;
+}
+
+#status-bar .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 5px;
+  background: color(gray);
+  margin: 4px 2px 0 2px;
+}
+
+#status-bar .dot.on {
+  background: #2c8cff;
+  box-shadow: 0 0 4px #2c8cff;
+}
+
+#status-bar .dot.on[title="Privacy mode"] {
+  background: #b060ff;
+}
+
+#status-bar .dot.on[title="Block user input"] {
+  background: #ff5c5c;
+}
+
+
+
