@@ -1099,7 +1099,17 @@ def main():
             return
         system2('cargo build --locked --release --features ' + features)
         # system2('upx.exe target/release/gatedesk.exe')
-        system2('mv target/release/gatedesk.exe target/release/GateDesk.exe')
+        # Case-only rename inside one directory. os.replace() cannot be used directly: on a
+        # case-insensitive filesystem the destination *is* the source file, so go through a
+        # temporary name. (`mv` could never work here either: os.system() always runs cmd.exe on
+        # Windows, and cmd has no mv.)
+        renamed_exe = 'target/release/GateDesk.exe'
+        if not os.path.exists(exe_path):
+            sys.stderr.write(f'{exe_path} not found, nothing to package. Exiting.\n')
+            sys.exit(-1)
+        tmp_exe = renamed_exe + '.rename'
+        os.replace(exe_path, tmp_exe)
+        os.replace(tmp_exe, renamed_exe)
         pa = os.environ.get('P')
         if pa:
             # https://certera.com/kb/tutorial-guide-for-safenet-authentication-client-for-code-signing/
@@ -1109,13 +1119,24 @@ def main():
         else:
             print('Not signed')
         os.makedirs(res_dir, exist_ok=True)
-        system2(
-            f'cp -rf target/release/GateDesk.exe {res_dir}')
+        shutil.copy2(renamed_exe, res_dir)
         os.chdir('libs/portable')
         system2('pip3 install -r requirements.txt')
+        # generate.py compresses everything in --folder into data.bin and rebuilds the packer in
+        # the workspace target dir. -e names the startup executable *inside* that folder: it is
+        # recorded in data.bin as the entry point, it is not an output path.
         system2(
-            f'python3 ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/gatedesk-{version}-win7-install.exe')
-        system2(f'mv ../../{res_dir}/gatedesk-{version}-win7-install.exe ../..')
+            f'python3 ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/GateDesk.exe')
+        os.chdir('../..')
+        # libs/portable picks its behaviour from the output file name: '*install.exe' runs the
+        # installer wizard, any other name extracts to %LOCALAPPDATA% and launches the client.
+        out_name = (f'gatedesk-portable-{version}.exe' if portable
+                    else f'gatedesk-{version}-win7-install.exe')
+        out_path = os.path.join(REPO_ROOT, out_name)
+        if os.path.exists(out_path):
+            os.unlink(out_path)
+        os.replace('./target/release/rustdesk-portable-packer.exe', out_path)
+        print(f'output location: {out_path}')
     elif os.path.isfile('/usr/bin/pacman'):
         # pacman -S -needed base-devel
         system2("sed -i 's/pkgver=.*/pkgver=%s/g' res/PKGBUILD" % version)
@@ -1242,6 +1263,8 @@ def md5_file_folder(base_dir):
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
