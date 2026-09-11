@@ -74,10 +74,17 @@ fn make_tray() -> hbb_common::ResultType<()> {
         None
     };
     let open_i = MenuItem::new(translate("Open".to_owned()), true, None);
+    // Read-only local ID row: the default (headless) form has no window, so this is
+    // the only place the service identity is visible without opening the main UI.
+    let id_i = MenuItem::new(
+        format!("{} {}", translate("ID:".to_owned()), crate::ipc::get_id()),
+        false,
+        None,
+    );
     if let Some(quit_i) = &quit_i {
-        tray_menu.append_items(&[&open_i, quit_i]).ok();
+        tray_menu.append_items(&[&id_i, &open_i, quit_i]).ok();
     } else {
-        tray_menu.append_items(&[&open_i]).ok();
+        tray_menu.append_items(&[&id_i, &open_i]).ok();
     }
     let tooltip = |count: usize| {
         if count == 0 {
@@ -104,7 +111,9 @@ fn make_tray() -> hbb_common::ResultType<()> {
 
     let open_func = move || {
         if cfg!(not(feature = "flutter")) {
-            crate::run_me::<&str>(vec![]).ok();
+            // `--ui`: a plain launch is headless now, so opening the window has to be
+            // asked for explicitly.
+            crate::run_me::<&str>(vec!["--ui"]).ok();
             return;
         }
         #[cfg(target_os = "macos")]
@@ -115,13 +124,13 @@ fn make_tray() -> hbb_common::ResultType<()> {
             // dialog, I found on one user's desktop, but no idea why, Windows is shit.
             // Use `run_me` instead.
             // `allow_multiple_instances` in `flutter/windows/runner/main.cpp` allows only one instance without args.
-            crate::run_me::<&str>(vec![]).ok();
+            crate::run_me::<&str>(vec!["--ui"]).ok();
         }
         #[cfg(target_os = "linux")]
         {
             // Do not use "xdg-open", it won't read the config.
             if crate::dbus::invoke_new_connection(crate::get_uri_prefix()).is_err() {
-                if let Ok(task) = crate::run_me::<&str>(vec![]) {
+                if let Ok(task) = crate::run_me::<&str>(vec!["--ui"]) {
                     crate::server::CHILD_PROCESS.lock().unwrap().push(task);
                 }
             }

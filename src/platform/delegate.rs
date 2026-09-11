@@ -176,7 +176,8 @@ extern "C" fn handle_menu_item(this: &mut Object, _: Sel, item: id) {
         let tag: isize = msg_send![item, tag];
         let tag = tag as u32;
         if tag == RUN_ME_TAG {
-            crate::run_me(Vec::<String>::new()).ok();
+            // `--ui`: a plain launch is headless now, so this has to ask for the window.
+            crate::run_me::<&str>(vec!["--ui"]).ok();
         } else {
             let inner: *mut c_void = *this.get_ivar(APP_HANDLER_IVAR);
             let inner = &mut *(inner as *mut DelegateState);

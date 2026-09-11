@@ -46,6 +46,8 @@ pub fn core_main() -> Option<Vec<String>> {
     let mut _is_quick_support = false;
     let mut _is_flutter_invoke_new_connection = false;
     let mut no_server = false;
+    // `--ui`: explicit entry to the full main UI, see the argument translation below.
+    let mut is_ui = false;
     let mut arg_exe = Default::default();
     for arg in std::env::args() {
         if i == 0 {
@@ -73,6 +75,11 @@ pub fn core_main() -> Option<Vec<String>> {
                 _is_quick_support = true;
             } else if arg == "--no-server" {
                 no_server = true;
+            } else if arg == "--ui" {
+                // Deliberately kept out of `args`: an empty `args` is what makes the
+                // UI start the main window, so this reproduces exactly the behaviour
+                // a plain launch used to have.
+                is_ui = true;
             } else {
                 args.push(arg);
             }
@@ -189,6 +196,15 @@ pub fn core_main() -> Option<Vec<String>> {
     if !crate::platform::is_installed() && (_is_elevate || _is_run_as_system) {
         crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
         return None;
+    }
+    // Enterprise edition startup semantics: a plain launch (double-click / no
+    // arguments) is the headless always-on client, not the full main UI, so an
+    // embedded business deployment never pops a window on start. Rewriting the
+    // arguments here keeps the `--server` branch below as the single definition of
+    // that form. The main UI is opt-in via `--ui` (diagnostics / first-time setup);
+    // url-scheme and other command-line launches are untouched.
+    if args.is_empty() && !is_ui {
+        args.push("--server".to_owned());
     }
     if args.is_empty() || crate::common::is_empty_uni_link(&args[0]) {
         #[cfg(target_os = "macos")]
@@ -408,7 +424,15 @@ pub fn core_main() -> Option<Vec<String>> {
                 hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
             }
             #[cfg(windows)]
-            crate::privacy_mode::restore_reg_connectivity(true, false);
+            {
+                crate::privacy_mode::restore_reg_connectivity(true, false);
+                // The headless form has no main window, so the tray is the only
+                // user-visible anchor. It must be spawned *before* the server call
+                // below, which blocks (`#[tokio::main]`), otherwise this never runs.
+                // The `--tray` entry re-checks for a running tray process, so a
+                // duplicate spawn is harmless.
+                hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+            }
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             {
                 crate::start_server(true, false);
