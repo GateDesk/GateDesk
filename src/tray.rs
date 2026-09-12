@@ -66,13 +66,29 @@ fn make_tray() -> hbb_common::ResultType<()> {
     let hide_stop_service = crate::ui_interface::get_builtin_option(
         hbb_common::config::keys::OPTION_HIDE_STOP_SERVICE,
     ) == "Y";
-    // The tray icon is only shown when the service is running, so we don't need to check
-    // the `stop-service` option here.
-    let quit_i = if !hide_stop_service {
-        Some(MenuItem::new(translate("Stop service".to_owned()), true, None))
+    // Whether the controllable service is currently stopped. This toggles the label
+    // of the dynamic menu item below: "Stop service" when running, "Enable service"
+    // when stopped.
+    let service_stopped = crate::ui_interface::get_option("stop-service") == "Y";
+    // Dynamic item: toggles the `stop-service` flag WITHOUT killing processes or
+    // exiting the tray. The main process picks the flag up on its next rendezvous
+    // loop, so this takes effect live.
+    let toggle_service_i = if !hide_stop_service {
+        Some(MenuItem::new(
+            if service_stopped {
+                translate("Enable service".to_owned())
+            } else {
+                translate("Stop service".to_owned())
+            },
+            true,
+            None,
+        ))
     } else {
         None
     };
+    // Exits the whole application (tray + main service) without persisting a
+    // `stop-service` flag, so the next launch is still a controllable host.
+    let exit_i = MenuItem::new(translate("Exit".to_owned()), true, None);
     let open_i = MenuItem::new(translate("Open".to_owned()), true, None);
     // Read-only local ID row: the default (headless) form has no window, so this is
     // the only place the service identity is visible without opening the main UI.
@@ -81,10 +97,18 @@ fn make_tray() -> hbb_common::ResultType<()> {
         false,
         None,
     );
-    if let Some(quit_i) = &quit_i {
-        tray_menu.append_items(&[&id_i, &open_i, quit_i]).ok();
+    // The "Open" menu item is defined but intentionally NOT appended to the menu
+    // (hidden). The open functionality (open_func / left-click handler below) stays
+    // intact so it can be re-enabled later by simply adding `open_i` back into the
+    // append list below.
+    if let Some(toggle_service_i) = &toggle_service_i {
+        // Add `&open_i` back here to restore the "Open" menu item.
+        tray_menu
+            .append_items(&[&id_i, toggle_service_i, &exit_i])
+            .ok();
     } else {
-        tray_menu.append_items(&[&id_i, &open_i]).ok();
+        // Add `&open_i` back here to restore the "Open" menu item.
+        tray_menu.append_items(&[&id_i, &exit_i]).ok();
     }
     let tooltip = |count: usize| {
         if count == 0 {
@@ -196,36 +220,39 @@ fn make_tray() -> hbb_common::ResultType<()> {
         }
 
         if let Ok(event) = menu_channel.try_recv() {
-            if let Some(quit_i) = &quit_i {
-                if event.id == quit_i.id() {
-                    /* failed in windows, seems no permission to check system process
-                    if !crate::check_process("--server", false) {
-                        *control_flow = ControlFlow::Exit;
-                        return;
+            if let Some(toggle_service_i) = &toggle_service_i {
+                if event.id == toggle_service_i.id() {
+                    // Toggle the controllable-host state WITHOUT killing processes or
+                    // exiting the tray. `ipc::set_option` broadcasts `Data::Options` to
+                    // the main process and writes the local config, so the rendezvous
+                    // loop picks it up live. Empty value removes the flag.
+                    let currently_stopped =
+                        crate::ui_interface::get_option("stop-service") == "Y";
+                    if currently_stopped {
+                        crate::ipc::set_option("stop-service", "");
+                        toggle_service_i.set_text(&translate("Stop service".to_owned()));
+                    } else {
+                        crate::ipc::set_option("stop-service", "Y");
+                        toggle_service_i.set_text(&translate("Enable service".to_owned()));
                     }
-                    */
-                    // Remove the icon first: on success `uninstall_service()` ends
-                    // this process with `std::process::exit`, which skips the
-                    // destructor that would remove it, leaving a ghost icon behind.
-                    #[cfg(windows)]
+                }
+            }
+            if event.id == exit_i.id() {
+                // Remove the icon first: `exit_application()` ends this process with
+                // `std::process::exit`, which skips the destructor that would remove
+                // it, leaving a ghost icon behind.
+                #[cfg(windows)]
+                {
                     let _ = _tray_icon
                         .lock()
                         .unwrap()
                         .as_mut()
                         .map(|t| t.set_visible(false));
-                    if !crate::platform::uninstall_service(false, false) {
-                        *control_flow = ControlFlow::Exit;
-                    }
-                    // Still alive, so stopping the service failed or was cancelled
-                    // in the UAC prompt. Show the icon again.
-                    #[cfg(windows)]
-                    let _ = _tray_icon
-                        .lock()
-                        .unwrap()
-                        .as_mut()
-                        .map(|t| t.set_visible(true));
-                } else if event.id == open_i.id() {
-                    open_func();
+                    crate::platform::windows::exit_application();
+                }
+                #[cfg(not(windows))]
+                {
+                    *control_flow = ControlFlow::Exit;
                 }
             } else if event.id == open_i.id() {
                 open_func();
@@ -246,7 +273,7 @@ fn make_tray() -> hbb_common::ResultType<()> {
                         if last_click.elapsed() < std::time::Duration::from_secs(1) {
                             return;
                         }
-                        open_func();
+                        // open_func();
                         last_click = std::time::Instant::now();
                     }
                 }

@@ -3282,10 +3282,66 @@ pub fn try_lock_tray_single_instance() -> bool {
     }
 }
 
+// Kill every gatedesk process except the one currently running this code (the tray),
+// using the current token. Used by the portable-mode "Exit" menu item (which must not
+// persist a `stop-service` flag) and by `uninstall_service` (which does).
+fn kill_all_gatedesk_except_current() {
+    let current_pid = get_current_pid();
+    // Match the on-disk process image name (e.g. "gatedesk.exe"), not the bare app
+    // name (`APP_NAME` may still read "RustDesk" in a renamed build), since both
+    // `get_pids_of_process_with_args` and `kill_process_by_pids` compare against
+    // `process.name()`.
+    let app_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+        .unwrap_or_else(|| format!("{}.exe", crate::get_app_name()).to_lowercase());
+    // Enumerate known arg shapes separately: no-arg main process and the tray. The
+    // current tray is filtered out below so we do not terminate ourselves mid-flow.
+    for pids in [
+        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_name, &[]),
+        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_name, &["--tray"]),
+    ] {
+        let others = pids
+            .into_iter()
+            .filter(|pid| pid.as_u32() != current_pid)
+            .collect::<Vec<_>>();
+        if !others.is_empty() {
+            if let Err(err) = kill_process_by_pids(&app_name, others) {
+                log::debug!("Failed to stop some processes: {err}");
+            }
+        }
+    }
+}
+
+// Quit the whole application (tray + main service) WITHOUT persisting a `stop-service`
+// flag, so the next launch still runs as a normal controllable host. Used by the tray
+// "Exit" menu item.
+pub fn exit_application() {
+    log::info!("Exiting application without changing the stop-service flag");
+    kill_all_gatedesk_except_current();
+    run_after_run_cmds(true);
+    std::process::exit(0);
+}
+
 pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     log::info!("Uninstalling service...");
-    let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
     Config::set_option("stop-service".into(), "Y".into());
+
+    // Portable / direct-launch mode: there is no installed Windows service, so the
+    // `sc stop/delete` batch and its `runas`-elevated `taskkill` are both pointless
+    // (and the elevation step can block or silently never run the kill). Kill the
+    // running processes directly with the current (already sufficient) token.
+    if !crate::platform::is_installed() {
+        log::info!("Portable mode: stopping processes directly without service control");
+        kill_all_gatedesk_except_current();
+        // Portable mode registers no startup shortcut and relies on no service, so
+        // there is nothing else to clean up. Mark stopped and exit like the installed
+        // path below.
+        run_after_run_cmds(!show_new_window);
+        std::process::exit(0);
+    }
+
+    let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
     let cmds = format!(
         "
     chcp 65001
