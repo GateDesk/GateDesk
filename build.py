@@ -20,6 +20,14 @@ from pathlib import Path
 # packaging container runs 3.6 and chdir's into flutter/ before it reaches the libdrmtap code.
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+# Run sub-scripts with the interpreter that is executing build.py itself, rather than assuming
+# Unix-style `python3` / `pip3` names. On Windows dev machines those names (the App Execution
+# Alias `python3` in particular) frequently don't exist or forward to a broken/PATH-less install,
+# which turns the packaging step into a hard `pip3 is not recognized` failure. Using
+# `sys.executable -m pip ...` works as long as the launcher Python has pip, which it must have to
+# run this script meaningfully.
+PY = '"' + sys.executable + '"'
+
 windows = platform.platform().startswith('Windows')
 osx = platform.platform().startswith(
     'Darwin') or platform.platform().startswith("macOS")
@@ -53,6 +61,32 @@ def system2(cmd):
     if exit_code != 0:
         sys.stderr.write(f"Error occurred when executing: `{cmd}`. Exiting.\n")
         sys.exit(-1)
+
+
+def ensure_requirements(requirements_file: str):
+    """Make sure the packages listed in a requirements file are importable.
+
+    Only installs the ones that are actually missing. This stops the packaging step from
+    hard-failing in two common local setups: (a) a launcher interpreter that has no `pip`
+    at all (uv-created venvs don't ship one) but already has the dependency, and (b) a
+    machine where `pip3` isn't on PATH. If a package genuinely is missing, install through
+    the interpreter running build.py; leave it to the downstream step to report a missing
+    module if the install can't happen.
+    """
+    try:
+        with open(requirements_file, encoding="utf-8") as f:
+            reqs = [ln.strip().split("=", 1)[0].split(">", 1)[0].split("<", 1)[0].strip()
+                    for ln in f if ln.strip() and not ln.strip().startswith("#")]
+    except OSError:
+        return
+
+    def importable(name: str) -> bool:
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+
+    missing = [r for r in reqs if r and not importable(r.replace("-", "_"))]
+    if missing:
+        system2(f"{PY} -m pip install " + " ".join(missing))
 
 
 def get_version():
@@ -1018,9 +1052,9 @@ def build_flutter_windows(version, features, skip_portable_pack, portable=False)
         # (NOT '*install.exe') makes it launch the app directly instead of
         # running the installer wizard.
         os.chdir('libs/portable')
-        system2('pip3 install -r requirements.txt')
+        ensure_requirements('requirements.txt')
         system2(
-            f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
+            f'{PY} ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
         os.chdir('../..')
         portable_exe = f'./gatedesk-portable-{version}.exe'
         if os.path.exists(portable_exe):
@@ -1031,9 +1065,9 @@ def build_flutter_windows(version, features, skip_portable_pack, portable=False)
     if skip_portable_pack:
         return
     os.chdir('libs/portable')
-    system2('pip3 install -r requirements.txt')
+    ensure_requirements('requirements.txt')
     system2(
-        f'python3 ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
+        f'{PY} ./generate.py -f ../../{flutter_build_dir_2} -o . -e ../../{flutter_build_dir_2}/gatedesk.exe')
     os.chdir('../..')
     if os.path.exists('./gatedesk_portable.exe'):
         os.replace('./target/release/rustdesk-portable-packer.exe',
@@ -1076,7 +1110,7 @@ def main():
     features = ','.join(get_features(args))
     flutter = args.flutter
     if not flutter:
-        system2('python3 res/inline-sciter.py')
+        system2(f'{PY} res/inline-sciter.py')
     print(args.skip_cargo)
     if args.skip_cargo:
         skip_cargo = True
@@ -1120,13 +1154,21 @@ def main():
             print('Not signed')
         os.makedirs(res_dir, exist_ok=True)
         shutil.copy2(renamed_exe, res_dir)
+        # The Sciter runtime must sit next to the exe (ui::start looks in the exe's own directory),
+        # and everything in `res_dir` is what generate.py compresses into data.bin. copy2() fails
+        # cleanly when sciter.dll is absent (a non-Sciter packaging machine); it only matters for
+        # the gatedesk (sciter) flavour.
+        try:
+            shutil.copy2('target/release/sciter.dll', res_dir)
+        except OSError:
+            pass
         os.chdir('libs/portable')
-        system2('pip3 install -r requirements.txt')
+        ensure_requirements('requirements.txt')
         # generate.py compresses everything in --folder into data.bin and rebuilds the packer in
         # the workspace target dir. -e names the startup executable *inside* that folder: it is
         # recorded in data.bin as the entry point, it is not an output path.
         system2(
-            f'python3 ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/GateDesk.exe')
+            f'{PY} ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/GateDesk.exe')
         os.chdir('../..')
         # libs/portable picks its behaviour from the output file name: '*install.exe' runs the
         # installer wizard, any other name extracts to %LOCALAPPDATA% and launches the client.

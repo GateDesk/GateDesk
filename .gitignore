@@ -59,6 +59,8 @@ flutter/web/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/
 logs/
+# uv-created build-only virtualenv used to satisfy build.py's python packaging deps (brotli)
+.venv-build/
 # build artifacts (flutter packaging outputs)
 gatedesk-portable-*.zip
 gatedesk-*-install.exe

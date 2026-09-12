@@ -8,6 +8,51 @@ fn build_windows() {
     println!("cargo:rerun-if-changed={}", file2);
 }
 
+/// Place `sciter.dll` next to the built executable.
+///
+/// The Sciter-based UI (`ui::start`) locates the runtime either in PATH or in the
+/// same directory as the exe (`exe.parent()`), never relative to the working
+/// directory. A dev build leaves the exe in `target/<profile>` with no dll beside
+/// it, so a `gatedesk.exe --ui` launch would panic with "sciter.dll was not found".
+/// Copying the dll onto the output directory keeps `--ui` (and the rest of the
+/// Sciter UI) working straight out of `cargo build --release`.
+///
+/// Candidate sources, in order of preference: the package dir, then its parent
+/// (the repo commonly keeps `sciter.dll` one level above the crate).
+#[cfg(windows)]
+fn ship_sciter_dll() {
+    use std::fs;
+    use std::path::Path;
+
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").ok();
+    let mut candidates = Vec::new();
+    if let Some(m) = &manifest {
+        for name in ["sciter.dll", "sciter1.dll", "sciter2.dll"] {
+            candidates.push(Path::new(m).join(name));
+            candidates.push(Path::new(m).join("..").join(name));
+        }
+    }
+    let Some(out_dir) = std::env::var("OUT_DIR").ok() else {
+        return;
+    };
+    // OUT_DIR = <target>/<profile>/build/<pkg>/out, so the exe dir is three levels up.
+    let exe_dir = Path::new(&out_dir).join("..").join("..").join("..");
+    let dest = exe_dir.join("sciter.dll");
+    if dest.exists() {
+        // A dll is already shipped (fresh manual copy or an installed bundle);
+        // don't clobber it.
+        return;
+    }
+    for src in candidates {
+        if src.exists() {
+            if fs::copy(&src, &dest).is_ok() && dest.exists() {
+                println!("cargo:rerun-if-changed={}", src.display());
+            }
+            return;
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn build_mac() {
     let file = "src/platform/macos.mm";
@@ -83,6 +128,8 @@ fn main() {
     build_manifest();
     #[cfg(windows)]
     build_windows();
+    #[cfg(windows)]
+    ship_sciter_dll();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "macos" {
         #[cfg(target_os = "macos")]
