@@ -2308,6 +2308,8 @@ pub fn read_custom_client(config: &str) {
         log::error!("Failed to dec custom client config");
         return;
     };
+    // A valid, signed rebrand config is what makes a client a "custom client".
+    *hbb_common::config::CUSTOM_CLIENT.write().unwrap() = true;
     let Ok(mut data) =
         serde_json::from_slice::<std::collections::HashMap<String, serde_json::Value>>(&data)
     else {
@@ -2397,7 +2399,7 @@ pub fn get_builtin_option(key: &str) -> String {
 
 #[inline]
 pub fn is_custom_client() -> bool {
-    get_app_name() != "RustDesk"
+    *hbb_common::config::CUSTOM_CLIENT.read().unwrap()
 }
 
 pub fn verify_login(_raw: &str, _id: &str) -> bool {
