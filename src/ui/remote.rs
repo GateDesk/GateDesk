@@ -566,6 +566,7 @@ impl sciter::EventHandler for SciterSession {
         fn take_screenshot(i32, String);
         fn handle_screenshot(String);
         fn get_toggle_option(String);
+        fn is_control_granted();
         fn is_privacy_mode_supported();
         fn toggle_option(String);
         fn toggle_privacy_mode(String, bool);

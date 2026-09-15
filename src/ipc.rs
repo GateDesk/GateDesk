@@ -353,6 +353,18 @@ pub enum Data {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     MouseMoveTime(i64),
     Authorize,
+    /// The peer has asked for permission to control this machine's mouse and
+    /// keyboard. Sent from the server-side connection to the CM window so it can
+    /// prompt the local user; also sent back with `pending: false` once the
+    /// prompt has been answered, so the CM can clear it.
+    ControlRequest {
+        /// `true` while a prompt is outstanding.
+        pending: bool,
+    },
+    /// The local user's answer to a pending `ControlRequest`, sent CM -> connection.
+    ControlResponse {
+        accepted: bool,
+    },
     Close,
     #[cfg(windows)]
     SAS,

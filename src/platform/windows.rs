@@ -4114,6 +4114,36 @@ pub fn message_box(text: &str) {
     unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), MB_OK) };
 }
 
+/// Ask the local user a yes/no question in a standalone, always-on-top dialog.
+///
+/// Used where the connection manager window cannot be relied on to be visible
+/// (`hide-cm`), so the question must not be asked by rendering something inside
+/// it. Returns `true` only on an explicit Yes; `NO_DIALOG=Y` answers No without
+/// showing anything, so an unattended process cannot hang on a modal dialog.
+pub fn message_box_confirm(text: &str) -> bool {
+    if std::env::var("NO_DIALOG").unwrap_or_default() == "Y" {
+        log::info!("[confirm] no dialog: answering no to {:?}", text);
+        return false;
+    }
+    let text = text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<u16>>();
+    let caption = crate::get_app_name()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<u16>>();
+    let res = unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND,
+        )
+    };
+    res == IDYES
+}
+
 pub fn alloc_console() {
     unsafe {
         alloc_console_and_redirect();

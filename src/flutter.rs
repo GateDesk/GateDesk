@@ -1517,6 +1517,13 @@ pub mod connection_manager {
             );
         }
 
+        fn update_control_request(&self, id: i32, pending: bool) {
+            self.push_event(
+                "update_control_request",
+                &[("id", &id.to_string()), ("pending", &pending.to_string())],
+            );
+        }
+
         fn change_theme(&self, dark: String) {
             self.push_event("theme", &[("dark", &dark)]);
         }

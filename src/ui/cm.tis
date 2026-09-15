@@ -42,6 +42,11 @@ class Body: Reactor.Component
         var disconnected = c.disconnected;
         var show_elevation_btn = handler.can_elevate() && show_elevation && !c.is_file_transfer && !c.is_view_camera && !c.is_terminal && c.port_forward.length == 0;
         var show_accept_btn = handler.get_option('approve-mode') != 'password';
+        var connected = auth && !disconnected;
+        // Once a session is up the controlled side is reduced to basic info plus
+        // the ways to end it. Granting control is an explicit decision made through
+        // the control request prompt, not through the permission row below.
+        var hide_details = c.is_file_transfer || c.is_terminal || c.port_forward || disconnected || connected;
        // below size:* is a workaround for Linux, it already set in css, but not work, shit sciter
         return <div .content style="size:*">
             <div .left-panel>
@@ -61,8 +66,8 @@ class Body: Reactor.Component
                     </div>
                 </div>
                 <div />
-                {c.is_file_transfer || c.is_terminal || c.port_forward || disconnected ? "" : <div>{translate('Permissions')}</div>}
-                {c.is_file_transfer || c.is_terminal || c.port_forward || disconnected ? "" : <div> <div class={permissions_locked ? "permissions locked" : "permissions"} style={permissions_locked ? "opacity:0.6;" : ""}>
+                {hide_details ? "" : <div>{translate('Permissions')}</div>}
+                {hide_details ? "" : <div> <div class={permissions_locked ? "permissions locked" : "permissions"} style={permissions_locked ? "opacity:0.6;" : ""}>
                     <div class={!c.keyboard ? "disabled" : ""} title={translate('Enable keyboard/mouse')}><icon .keyboard /></div>
                     <div class={!c.clipboard ? "disabled" : ""} title={translate('Enable clipboard')}><icon .clipboard /></div>
                     <div class={!c.audio ? "disabled" : ""} title={translate('Enable audio')}><icon .audio /></div>
@@ -79,6 +84,13 @@ class Body: Reactor.Component
                 {c.is_terminal ? <div>{translate('Terminal')}</div> : ""}
                 {c.port_forward ? <div>Port Forwarding: {c.port_forward}</div> : ""}
                 <div style="size:*"/>
+                {connected && c.pending_control ? <div .control-request>
+                    <div>{translate('A remote user requests to control your mouse and keyboard')}</div>
+                    <div .inner_buttons>
+                        <button #allow_control .control .button>{translate('Allow')}</button>
+                        <button #deny_control .control .outline>{translate('Deny')}</button>
+                    </div>
+                </div> : ""}
                 <div .outer_buttons>
                     {!auth && !disconnected && show_elevation_btn && show_accept_btn ? <button #elevate_accept .control .elevate .button><span><span><span>{svg_elevate}</span><span>{translate('Accept')}</span></span></span></button> : "" }
                     {auth && !disconnected && show_elevation_btn ? <button #elevate .control .elevate .button><span><span><span>{svg_elevate}</span><span>{translate('Elevate')}</span></span></span></button> : "" }
@@ -89,7 +101,7 @@ class Body: Reactor.Component
                     {auth && !disconnected ? <button #disconnect .control .button>{translate('Disconnect')}</button> : "" }
                     {auth && disconnected ? <button #close .control .button>{translate('Close')}</button> : "" }
                 </div>
-                {c.is_file_transfer || c.is_terminal || c.port_forward ? "" : <div .chaticon>{svg_chat}</div>}
+                {hide_details ? "" : <div .chaticon>{svg_chat}</div>}
             </div>
             <div .right-panel style={right_style}>
                 {c.is_file_transfer || c.is_terminal || c.port_forward ? "" : <ChatBox msgs={c.msgs} callback={callback} />}
@@ -236,6 +248,25 @@ class Body: Reactor.Component
         var cid = this.cid;
         checkClickTime(function() {
             handler.close(cid);
+        });
+    }
+
+    event click $(button#allow_control) {
+        var { cid, connection } = this;
+        checkClickTime(function() {
+            connection.pending_control = false;
+            connection.keyboard = true;
+            body.update();
+            handler.respond_control_request(cid, true);
+        });
+    }
+
+    event click $(button#deny_control) {
+        var { cid, connection } = this;
+        checkClickTime(function() {
+            connection.pending_control = false;
+            body.update();
+            handler.respond_control_request(cid, false);
         });
     }
 
@@ -415,6 +446,7 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         keyboard: keyboard, clipboard: clipboard, msgs: [], unreaded: 0,
         audio: audio, file: file, restart: restart, recording: recording,
         block_input:block_input, privacy_mode:privacy_mode,
+        pending_control: false,
         disconnected: false
     };
     if (idx < 0) {
@@ -432,6 +464,13 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
             setWindowState(View.WINDOW_MINIMIZED);
         });
     }
+}
+
+handler.updateControlRequest = function(id, pending) {
+    connections.map(function(c) {
+        if (c.id == id) c.pending_control = pending;
+    });
+    update();
 }
 
 handler.removeConnection = function(id, close) {
@@ -461,7 +500,12 @@ handler.newMessage = function(id, text) {
     if (!conn) return;
     conn.msgs.push({name: conn.name, text: text, time: getNowStr()});
     bring_to_top(idx);
-    if (idx == body.cur) {
+    // In an established remote-desktop session the chat UI is hidden (basic info
+    // plus disconnect only), so the panel must not be forced open either: with
+    // the toggle icon gone it could never be closed again. The message is still
+    // kept and counted as unread.
+    var established = conn.authorized && !conn.disconnected && !conn.is_file_transfer && !conn.is_terminal && !conn.port_forward;
+    if (idx == body.cur && !established) {
         var shouldAdapt = !show_chat;
         show_chat = true;
         if (shouldAdapt) adaptSizeForChat();

@@ -294,6 +294,14 @@ pub struct Connection {
     // audio by the remote peer/client
     tx_input: std_mpsc::Sender<MessageInput>,
     // handle input messages
+    /// Whether the local user has approved peer control of this machine's mouse
+    /// and keyboard for this session. Every session starts view-only; see
+    /// `peer_input_enabled` and `ipc::Data::ControlRequest`.
+    control_authorized: bool,
+    /// Whether a control request from the peer is waiting for the local user to
+    /// answer it in the connection manager. Stops the prompt being raised again
+    /// on every option message the peer sends.
+    control_requested: bool,
     video_ack_required: bool,
     server_audit_conn: String,
     server_audit_file: String,
@@ -498,6 +506,8 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             show_my_cursor: false,
             tx_input,
+            control_authorized: false,
+            control_requested: false,
             video_ack_required: false,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
@@ -557,7 +567,9 @@ impl Connection {
         conn.send_permission(Permission::Keyboard, conn.keyboard)
             .await;
         #[cfg(not(target_os = "android"))]
-        if !conn.keyboard {
+        if !conn.peer_input_enabled() {
+            // Sessions start view-only, so tell the peer up front that it must
+            // keep its keyboard idle until the local user approves control.
             conn.send_permission(Permission::Keyboard, false).await;
         }
         if !conn.clipboard {
@@ -634,6 +646,30 @@ impl Connection {
                             if conn.port_forward_socket.is_some() {
                                 break;
                             }
+                        }
+                        ipc::Data::ControlResponse { accepted } => {
+                            // The local user answered the peer's control request.
+                            // Approval lasts for this session only.
+                            conn.control_requested = false;
+                            conn.control_authorized = accepted;
+                            if accepted {
+                                conn.disable_keyboard = false;
+                            }
+                            conn.send_permission(
+                                Permission::Keyboard,
+                                conn.peer_input_enabled(),
+                            )
+                            .await;
+                            if accepted {
+                                if let Some(s) = conn.server.upgrade() {
+                                    s.write().unwrap().subscribe(
+                                        NAME_CURSOR,
+                                        conn.inner.clone(),
+                                        conn.peer_keyboard_enabled() || conn.show_remote_cursor,
+                                    );
+                                }
+                            }
+                            conn.send_to_cm(ipc::Data::ControlRequest { pending: false });
                         }
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
@@ -2159,6 +2195,20 @@ impl Connection {
         self.keyboard && !self.disable_keyboard
     }
 
+    /// Gate for injecting peer input into this machine.
+    ///
+    /// Deliberately stricter than `peer_keyboard_enabled`, which also decides
+    /// whether the remote cursor and clipboard services run: those must keep
+    /// working in view-only mode, so the approval check lives here and is applied
+    /// only at the input dispatch sites.
+    ///
+    /// Mouse, pointer and keyboard all go through this gate, and the decision is
+    /// made on the controlled side, so a modified client cannot opt itself in.
+    #[inline]
+    fn peer_input_enabled(&self) -> bool {
+        self.peer_keyboard_enabled() && self.control_authorized
+    }
+
     fn clipboard_enabled(&self) -> bool {
         self.clipboard && !self.disable_clipboard
     }
@@ -2981,7 +3031,7 @@ impl Connection {
                         log::debug!("call_main_service_pointer_input fail:{}", e);
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                    if self.peer_keyboard_enabled() {
+                    if self.peer_input_enabled() {
                         if is_left_up(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         } else {
@@ -3044,7 +3094,7 @@ impl Connection {
                         log::debug!("call_main_service_pointer_input fail:{}", e);
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                    if self.peer_keyboard_enabled() {
+                    if self.peer_input_enabled() {
                         MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
                         self.input_pointer(pde, self.inner.id());
                     }
@@ -3112,7 +3162,7 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
-                    if self.peer_keyboard_enabled() {
+                    if self.peer_input_enabled() {
                         if is_enter(&me) {
                             CLICK_TIME.store(get_time(), Ordering::SeqCst);
                         }
@@ -4788,7 +4838,19 @@ impl Connection {
         }
         if let Ok(q) = o.disable_keyboard.enum_value() {
             if q != BoolOption::NotSet {
-                self.disable_keyboard = q == BoolOption::Yes;
+                // A session starts view-only. The peer clearing this flag is how it
+                // asks to control this machine's mouse and keyboard, so record the
+                // request and let the local user answer it in the connection manager
+                // rather than switching input on straight away.
+                if q == BoolOption::No && !self.control_authorized {
+                    self.disable_keyboard = true;
+                    if !self.control_requested {
+                        self.control_requested = true;
+                        self.send_to_cm(ipc::Data::ControlRequest { pending: true });
+                    }
+                } else {
+                    self.disable_keyboard = q == BoolOption::Yes;
+                }
                 if let Some(s) = self.server.upgrade() {
                     s.write().unwrap().subscribe(
                         super::clipboard_service::NAME,

@@ -53,6 +53,31 @@ impl InvokeUiCM for SciterHandler {
         self.call("newMessage", &make_args!(id, text));
     }
 
+    fn update_control_request(&self, id: i32, pending: bool) {
+        // With `hide-cm` the connection manager window is never shown, so a prompt
+        // drawn inside it would be invisible and the session would stay view-only
+        // with nobody able to grant control. Ask in a standalone topmost dialog
+        // instead: it does not depend on that window's visibility. On platforms
+        // without such a dialog the prompt stays in the window, and `hide-cm`
+        // should not be combined with requiring approval.
+        #[cfg(windows)]
+        if pending && *HIDE_CM.lock().unwrap() {
+            std::thread::spawn(move || {
+                let peer_id = crate::ui_cm_interface::get_client_peer_id(id);
+                let mut text = crate::client::translate(
+                    "A remote user requests to control your mouse and keyboard".to_owned(),
+                );
+                if !peer_id.is_empty() {
+                    text = format!("{}\n\n({})", text, peer_id);
+                }
+                let accepted = crate::platform::windows::message_box_confirm(&text);
+                crate::ui_cm_interface::respond_control_request(id, accepted);
+            });
+            return;
+        }
+        self.call("updateControlRequest", &make_args!(id, pending));
+    }
+
     fn change_theme(&self, dark: String) {
         self.call("changeTheme", &make_args!(dark));
     }
@@ -122,6 +147,10 @@ impl SciterConnectionManager {
         crate::ui_cm_interface::switch_permission(id, name, enabled);
     }
 
+    fn respond_control_request(&self, id: i32, accepted: bool) {
+        crate::ui_cm_interface::respond_control_request(id, accepted);
+    }
+
     fn close(&self, id: i32) {
         crate::ui_cm_interface::close(id);
     }
@@ -187,6 +216,7 @@ impl sciter::EventHandler for SciterConnectionManager {
         fn quit();
         fn authorize(i32);
         fn switch_permission(i32, String, bool);
+        fn respond_control_request(i32, bool);
         fn send_msg(i32, String);
         fn can_elevate();
         fn elevate_portable(i32);

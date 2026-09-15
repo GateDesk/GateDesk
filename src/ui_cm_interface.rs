@@ -187,6 +187,10 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     fn new_message(&self, id: i32, text: String);
 
+    /// Tell the CM window whether a control request from this peer is waiting for
+    /// the local user to approve it.
+    fn update_control_request(&self, id: i32, pending: bool);
+
     fn change_theme(&self, dark: String);
 
     fn change_language(&self);
@@ -426,6 +430,28 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
     };
 }
 
+/// Send the local user's answer to the peer's control request back to the
+/// connection that raised it.
+#[inline]
+#[cfg(not(any(target_os = "ios")))]
+pub fn respond_control_request(id: i32, accepted: bool) {
+    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+        allow_err!(client.tx.send(Data::ControlResponse { accepted }));
+    };
+}
+
+/// Peer id of a live connection, for prompts that have to name who is asking.
+#[inline]
+#[cfg(not(any(target_os = "ios")))]
+pub fn get_client_peer_id(id: i32) -> String {
+    CLIENTS
+        .read()
+        .unwrap()
+        .get(&id)
+        .map(|c| c.peer_id.clone())
+        .unwrap_or_default()
+}
+
 #[inline]
 #[cfg(target_os = "android")]
 pub fn switch_permission_all(name: String, enabled: bool) {
@@ -581,6 +607,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
+                                }
+                                Data::ControlRequest { pending } => {
+                                    self.cm.update_control_request(self.conn_id, pending);
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     // Keep this branch scoped to privacy mode rollback.

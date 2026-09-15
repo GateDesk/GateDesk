@@ -2228,6 +2228,11 @@ pub fn cm_switch_permission(conn_id: i32, name: String, enabled: bool) {
     crate::ui_cm_interface::switch_permission(conn_id, name, enabled)
 }
 
+pub fn cm_respond_control_request(conn_id: i32, accepted: bool) {
+    #[cfg(not(any(target_os = "ios")))]
+    crate::ui_cm_interface::respond_control_request(conn_id, accepted)
+}
+
 pub fn cm_can_elevate() -> SyncReturn<bool> {
     SyncReturn(crate::ui_cm_interface::can_elevate())
 }

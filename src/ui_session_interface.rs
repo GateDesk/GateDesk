@@ -444,6 +444,14 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().get_toggle_option(&name)
     }
 
+    /// Whether the peer has granted us control of its mouse and keyboard for this
+    /// session. Starts `false`: the peer's sessions begin view-only, and asking is
+    /// an explicit action (`toggle_option("request-control")`) that the peer's
+    /// local user has to approve.
+    pub fn is_control_granted(&self) -> bool {
+        *self.server_keyboard_enabled.read().unwrap()
+    }
+
     #[cfg(not(feature = "flutter"))]
     pub fn is_privacy_mode_supported(&self) -> bool {
         self.lc.read().unwrap().is_privacy_mode_supported()
