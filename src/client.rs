@@ -2196,6 +2196,11 @@ impl LoginConfigHandler {
                     option.show_my_cursor = BoolOption::No.into();
                 }
             }
+        } else if name == "request-control" {
+            // Ask the peer to let us drive its mouse and keyboard. The peer answers
+            // this through its connection manager; until it does, the session stays
+            // view-only on its side. Nothing is persisted: the grant is per session.
+            option.disable_keyboard = BoolOption::No.into();
         } else if name == "show-my-cursor" {
             config.show_my_cursor.v = !config.show_my_cursor.v;
             option.show_my_cursor = if config.show_my_cursor.v {
@@ -2224,7 +2229,7 @@ impl LoginConfigHandler {
             crate::clipboard::try_empty_clipboard_files(crate::clipboard::ClipboardSide::Client, 0);
         }
 
-        if !name.contains("block-input") {
+        if !name.contains("block-input") && name != "request-control" {
             self.save_config(config);
         }
         let mut misc = Misc::new();
