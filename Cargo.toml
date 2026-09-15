@@ -217,6 +217,19 @@ exclude = ["vdi/host"]
 [patch.crates-io]
 libxdo-sys = { path = "libs/libxdo-sys-stub" }
 
+# rust-sciter models its flag and event-code types (window flags, event groups,
+# element state bits, behavior events, event phases, click reasons, behavior
+# method ids, host notification codes) as C-style enums and builds or decodes
+# engine-supplied values with mem::transmute. Any value that is not a declared
+# variant is an invalid enum value - undefined behaviour that current Rust
+# turns into a hard abort, so no window could be created at all, and a peer
+# connection aborted later on a <video> event. libs/rust-sciter is the same
+# crate (0.5.57) with those types turned into #[repr(transparent)] newtypes
+# carrying associated constants; see its scdef.rs, scbehavior.rs and scdom.rs,
+# and the `as UINT` / `transmute` call sites they required.
+[patch."https://github.com/rustdesk-org/rust-sciter"]
+sciter-rs = { path = "libs/rust-sciter" }
+
 [package.metadata.winres]
 LegalCopyright = "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved."
 ProductName = "GateDesk"
