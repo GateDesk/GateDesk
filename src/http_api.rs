@@ -86,6 +86,11 @@ fn respond(request: Request, status: u16, body: String) {
         if let Some(h) = header("Access-Control-Allow-Origin", &allowed) {
             response = response.with_header(h);
         }
+        // Chrome 私有网络访问(PNA):从局域网来源(如 http://192.168.x.x:3000)访问
+        // 回环 127.0.0.1:21120 时,浏览器要求响应显式放行,否则拦截读取导致 fetch 失败。
+        if let Some(h) = header("Access-Control-Allow-Private-Network", "true") {
+            response = response.with_header(h);
+        }
     }
     if let Some(h) = header("Content-Type", "application/json; charset=utf-8") {
         response = response.with_header(h);
@@ -565,6 +570,7 @@ fn handle(request: Request) {
             ("Access-Control-Allow-Origin", allowed.as_str()),
             ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
             ("Access-Control-Allow-Headers", "Authorization, Content-Type"),
+            ("Access-Control-Allow-Private-Network", "true"),
             ("Access-Control-Max-Age", "600"),
         ] {
             if let Some(h) = header(k, v) {
