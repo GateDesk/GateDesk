@@ -217,6 +217,14 @@ exclude = ["vdi/host"]
 [patch.crates-io]
 libxdo-sys = { path = "libs/libxdo-sys-stub" }
 
+# libsodium-sys 0.2.7 selects its prebuilt library with #[cfg(target_pointer_width)], which the
+# build script evaluates for the *host*: cross compiling from x64 to x86 handed the linker the
+# x64 library and the link failed with LNK4272. libs/libsodium-sys is the same crate (0.2.7)
+# with that selection reading the target's cfgs at run time instead, so
+# `cargo build --target i686-pc-windows-msvc` links without any extra flags. See the
+# `get_lib_dir` comment in its build.rs.
+libsodium-sys = { path = "libs/libsodium-sys" }
+
 # rust-sciter models its flag and event-code types (window flags, event groups,
 # element state bits, behavior events, event phases, click reasons, behavior
 # method ids, host notification codes) as C-style enums and builds or decodes
