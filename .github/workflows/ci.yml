@@ -162,6 +162,13 @@ jobs:
         targets: ${{ matrix.job.target }}
         components: ''
 
+    - name: Pin this job's toolchain over rust-toolchain.toml
+      # The repo root pins 1.75.0 for release builds (see rust-toolchain.toml), and a toolchain
+      # file outranks `rustup default` - the only thing the action above does. It does not
+      # outrank a directory override, so this keeps the job on `stable`: catching what a newer
+      # compiler makes of the tree is the whole reason this job exists.
+      run: rustup override set stable
+
     - name: Show version information (Rust, cargo, GCC)
       shell: bash
       run: |

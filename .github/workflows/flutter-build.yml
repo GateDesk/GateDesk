@@ -449,6 +449,12 @@ jobs:
           targets: ${{ matrix.job.target }}
           components: "rustfmt"
 
+      - name: Pin this job's toolchain over rust-toolchain.toml
+        # The repo root pins 1.75.0 for release builds (see rust-toolchain.toml), and a toolchain
+        # file outranks `rustup default` - the only thing the action above does. It does not
+        # outrank a directory override, so this is what keeps the nightly this job needs.
+        run: rustup override set nightly-2023-10-13-${{ matrix.job.target }}
+
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           prefix-key: ${{ matrix.job.os }}-sciter
@@ -796,6 +802,12 @@ jobs:
           toolchain: ${{ env.MAC_RUST_VERSION }}
           targets: ${{ matrix.job.target }}
           components: "rustfmt"
+
+      - name: Pin this job's toolchain over rust-toolchain.toml
+        # The repo root pins 1.75.0 for release builds (see rust-toolchain.toml), and a toolchain
+        # file outranks `rustup default` - the only thing the action above does. It does not
+        # outrank a directory override, so this is what keeps the 1.81 that cidre requires.
+        run: rustup override set ${{ env.MAC_RUST_VERSION }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:

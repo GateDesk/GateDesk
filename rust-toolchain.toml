@@ -1,0 +1,23 @@
+# Release builds must use 1.75. Since Rust 1.78 the `*-pc-windows-msvc` targets no longer
+# support Windows 7/8/8.1, and most of our customers run Windows 7 (32 bit and 64 bit alike).
+# A newer toolchain emits imports that do not exist there - `api-ms-win-core-synch-l1-2-0.dll`
+# (`WaitOnAddress`, `WakeByAddress*`) and `KERNEL32!GetSystemTimePreciseAsFileTime` - so the
+# binary fails to load on Win7 even though it runs fine on the build machine. `rust-version` in
+# Cargo.toml is a floor, not a pin - it still lets a newer compiler produce that binary.
+#
+# This file outranks the *default* toolchain, and the `dtolnay/rust-toolchain` step in CI only
+# runs `rustup default`, so by itself it would override a toolchain a job picked on purpose.
+# Every CI job that needs something other than 1.75 therefore follows that step with
+# `rustup override set`, which this file does *not* outrank:
+#   - build-for-windows-sciter: nightly-2023-10-13, for the abi_thiscall feature
+#   - build-for-macOS:          1.81, because cidre requires it
+#   - ci.yml (build):           stable, since checking what the current compiler makes of the
+#                               tree is that job's whole point
+# A job that pins a different version has to do the same, or it silently builds with 1.75.
+#
+# For local development with a newer compiler, ask for it explicitly: `cargo +stable ...`.
+[toolchain]
+channel = "1.75.0"
+# The 32 bit Sciter build is a product requirement, so keep its std installed: without it,
+# `--target i686-pc-windows-msvc` fails with "can't find crate for `std`".
+targets = ["i686-pc-windows-msvc"]
