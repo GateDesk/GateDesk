@@ -31,7 +31,19 @@ PY = '"' + sys.executable + '"'
 windows = platform.platform().startswith('Windows')
 osx = platform.platform().startswith(
     'Darwin') or platform.platform().startswith("macOS")
+
+# Product architecture names. `--target` only accepts rustc's own triples, which is where the
+# unlovely `i686-pc-windows-msvc` spelling comes from, so the mapping from the name we build
+# and ship by - x64 / x86 - to the triple lives here and nowhere else.
+TARGETS = {
+    'x64': 'x86_64-pc-windows-msvc',
+    'x86': 'i686-pc-windows-msvc',
+}
 hbb_name = 'gatedesk' + ('.exe' if windows else '')
+# Where cargo leaves the release artifacts of the platform being packaged. Recalculated by
+# `select_arch()`: a plain host build keeps `target/release`, an explicit architecture uses
+# cargo's own `target/<triple>/release` layout.
+cargo_release_dir = 'target/release'
 exe_path = 'target/release/' + hbb_name
 if windows:
     win_arch = 'arm64' if platform.machine().lower() in ('arm64', 'aarch64') else 'x64'
@@ -55,6 +67,21 @@ def get_deb_extra_depends() -> str:
     if custom_arch == "armhf": # for arm32v7 libsciter-gtk.so
         return ", libatomic1"
     return ""
+
+def select_arch(arch):
+    """Point the cargo output paths at the selected architecture, returning its triple.
+
+    `arch` is None (build for the host, which is what every non-Windows platform does) or one
+    of TARGETS. Returning None means "let cargo use the host", and the output paths stay put.
+    """
+    global cargo_release_dir, exe_path
+    if arch is None:
+        return None
+    triple = TARGETS[arch]
+    cargo_release_dir = f'target/{triple}/release'
+    exe_path = f'{cargo_release_dir}/{hbb_name}'
+    return triple
+
 
 def system2(cmd):
     exit_code = os.system(cmd)
@@ -192,6 +219,14 @@ def make_parser():
         help='Skip cargo build process, only flutter version + Linux supported currently'
     )
     if windows:
+        parser.add_argument(
+            '--arch',
+            choices=sorted(TARGETS),
+            default=None,
+            help='Windows: build for an explicit architecture instead of the host - x64 or x86 '
+                 '(i686-pc-windows-msvc). Default is the host architecture, which keeps cargo '
+                 'output in the usual target/release.'
+        )
         parser.add_argument(
             '--skip-portable-pack',
             action='store_true',
@@ -1102,6 +1137,20 @@ def main():
         print(feats)
         return
 
+    # Windows: an explicit architecture both selects cargo's --target and moves every expected
+    # output path, so it has to be settled before anything reads `exe_path` or build.
+    arch = getattr(args, 'arch', None)
+    if arch == 'x86' and args.flutter:
+        sys.stderr.write('--arch x86 is for the Sciter flavour; the Flutter runner is x64 '
+                         'only. Exiting.\n')
+        sys.exit(-1)
+    target_flags = ''
+    packer_target_arg = ''
+    if arch:
+        print(f'Building for {arch} ({TARGETS[arch]})')
+        select_arch(arch)
+        target_flags = f' --target {TARGETS[arch]}'
+        packer_target_arg = f' -t {TARGETS[arch]}'
     if os.path.exists(exe_path):
         os.unlink(exe_path)
     if os.path.isfile('/usr/bin/pacman'):
@@ -1124,20 +1173,20 @@ def main():
     if windows:
         # build virtual display dynamic library
         os.chdir('libs/virtual_display/dylib')
-        system2('cargo build --locked --release')
+        system2('cargo build --locked --release' + target_flags)
         os.chdir('../../..')
 
         if flutter:
             build_flutter_windows(version, features, args.skip_portable_pack,
                                   args.portable)
             return
-        system2('cargo build --locked --release --features ' + features)
+        system2('cargo build --locked --release --features ' + features + target_flags)
         # system2('upx.exe target/release/gatedesk.exe')
         # Case-only rename inside one directory. os.replace() cannot be used directly: on a
         # case-insensitive filesystem the destination *is* the source file, so go through a
         # temporary name. (`mv` could never work here either: os.system() always runs cmd.exe on
         # Windows, and cmd has no mv.)
-        renamed_exe = 'target/release/GateDesk.exe'
+        renamed_exe = f'{cargo_release_dir}/GateDesk.exe'
         if not os.path.exists(exe_path):
             sys.stderr.write(f'{exe_path} not found, nothing to package. Exiting.\n')
             sys.exit(-1)
@@ -1149,7 +1198,7 @@ def main():
             # https://certera.com/kb/tutorial-guide-for-safenet-authentication-client-for-code-signing/
             system2(
                 f'signtool sign /a /v /p {pa} /debug /f .\\cert.pfx /t http://timestamp.digicert.com  '
-                'target\\release\\GateDesk.exe')
+                f'{renamed_exe}')
         else:
             print('Not signed')
         os.makedirs(res_dir, exist_ok=True)
@@ -1159,25 +1208,32 @@ def main():
         # cleanly when sciter.dll is absent (a non-Sciter packaging machine); it only matters for
         # the gatedesk (sciter) flavour.
         try:
-            shutil.copy2('target/release/sciter.dll', res_dir)
+            shutil.copy2(f'{cargo_release_dir}/sciter.dll', res_dir)
         except OSError:
             pass
         os.chdir('libs/portable')
         ensure_requirements('requirements.txt')
         # generate.py compresses everything in --folder into data.bin and rebuilds the packer in
         # the workspace target dir. -e names the startup executable *inside* that folder: it is
-        # recorded in data.bin as the entry point, it is not an output path.
+        # recorded in data.bin as the entry point, it is not an output path. -t makes the rebuilt
+        # packer match the package's architecture, which matters because that packer *is* the
+        # self-extracting stub: a 64 bit stub could not start on a 32 bit Windows 7.
         system2(
-            f'{PY} ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/GateDesk.exe')
+            f'{PY} ./generate.py -f ../../{res_dir} -o . -e ../../{res_dir}/GateDesk.exe'
+            + packer_target_arg)
         os.chdir('../..')
         # libs/portable picks its behaviour from the output file name: '*install.exe' runs the
         # installer wizard, any other name extracts to %LOCALAPPDATA% and launches the client.
-        out_name = (f'gatedesk-portable-{version}.exe' if portable
-                    else f'gatedesk-{version}-win7-install.exe')
+        # An explicit --arch is part of the name: both architectures write into the repository
+        # root, and without the suffix a second build silently replaces the first one's package
+        # (the two differ only by the triple inside target/, which the file name would not show).
+        arch_suffix = f'-{arch}' if arch else ''
+        out_name = (f'gatedesk-portable-{version}{arch_suffix}.exe' if portable
+                    else f'gatedesk-{version}{arch_suffix}-win7-install.exe')
         out_path = os.path.join(REPO_ROOT, out_name)
         if os.path.exists(out_path):
             os.unlink(out_path)
-        os.replace('./target/release/rustdesk-portable-packer.exe', out_path)
+        os.replace(f'./{cargo_release_dir}/rustdesk-portable-packer.exe', out_path)
         print(f'output location: {out_path}')
     elif os.path.isfile('/usr/bin/pacman'):
         # pacman -S -needed base-devel

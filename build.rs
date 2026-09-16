@@ -19,15 +19,30 @@ fn build_windows() {
 ///
 /// Candidate sources, in order of preference: the package dir, then its parent
 /// (the repo commonly keeps `sciter.dll` one level above the crate).
+///
+/// Only a runtime whose architecture matches the target is shipped: the repo keeps a
+/// single `sciter.dll` (x64), so an x86 build would otherwise inherit a dll it cannot
+/// load and fail at UI startup for a reason that has nothing to do with the build.
+/// `sciter-<arch>.dll` is looked for first, because the two architectures have to live
+/// side by side and cannot share the bare name.
 #[cfg(windows)]
 fn ship_sciter_dll() {
     use std::fs;
     use std::path::Path;
 
+    let Some((target_arch, target_machine)) = target_arch() else {
+        return;
+    };
     let manifest = std::env::var("CARGO_MANIFEST_DIR").ok();
     let mut candidates = Vec::new();
     if let Some(m) = &manifest {
-        for name in ["sciter.dll", "sciter1.dll", "sciter2.dll"] {
+        let names = [
+            format!("sciter-{}.dll", target_arch),
+            "sciter.dll".to_owned(),
+            "sciter1.dll".to_owned(),
+            "sciter2.dll".to_owned(),
+        ];
+        for name in &names {
             candidates.push(Path::new(m).join(name));
             candidates.push(Path::new(m).join("..").join(name));
         }
@@ -44,12 +59,71 @@ fn ship_sciter_dll() {
         return;
     }
     for src in candidates {
-        if src.exists() {
-            if fs::copy(&src, &dest).is_ok() && dest.exists() {
-                println!("cargo:rerun-if-changed={}", src.display());
-            }
-            return;
+        if !src.exists() {
+            continue;
         }
+        match pe_machine(&src) {
+            Some(machine) if machine == target_machine => {
+                if fs::copy(&src, &dest).is_ok() && dest.exists() {
+                    println!("cargo:rerun-if-changed={}", src.display());
+                }
+                return;
+            }
+            Some(machine) => println!(
+                "cargo:warning={} holds the {} runtime while this build targets {}; not \
+                 shipping it. Put an {} sciter.dll next to {} to run the UI.",
+                src.display(),
+                pe_machine_name(machine),
+                pe_machine_name(target_machine),
+                pe_machine_name(target_machine),
+                dest.display()
+            ),
+            None => println!(
+                "cargo:warning={} is not a readable PE image; not shipping it.",
+                src.display()
+            ),
+        }
+    }
+}
+
+/// Product architecture name (the short one we build and ship by) and the PE `Machine`
+/// value the Sciter runtime must carry to be loadable by this build.
+#[cfg(windows)]
+fn target_arch() -> Option<(&'static str, u16)> {
+    match std::env::var("CARGO_CFG_TARGET_ARCH").ok()?.as_str() {
+        "x86" => Some(("x86", 0x014c)),       // IMAGE_FILE_MACHINE_I386
+        "x86_64" => Some(("x64", 0x8664)),    // IMAGE_FILE_MACHINE_AMD64
+        "aarch64" => Some(("arm64", 0xaa64)), // IMAGE_FILE_MACHINE_ARM64
+        _ => None,
+    }
+}
+
+/// PE `Machine` value of a dll, `None` when the file is not a readable PE image.
+#[cfg(windows)]
+fn pe_machine(path: &std::path::Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    file.seek(SeekFrom::Start(0x3c)).ok()?; // e_lfanew
+    let mut offset = [0u8; 4];
+    file.read_exact(&mut offset).ok()?;
+    file.seek(SeekFrom::Start(u32::from_le_bytes(offset) as u64))
+        .ok()?;
+    let mut header = [0u8; 6]; // signature + Machine
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != b"PE\0\0" {
+        return None;
+    }
+    Some(u16::from_le_bytes([header[4], header[5]]))
+}
+
+#[cfg(windows)]
+fn pe_machine_name(machine: u16) -> &'static str {
+    match machine {
+        0x014c => "x86",
+        0x8664 => "x64",
+        0xaa64 => "arm64",
+        _ => "unknown-arch",
     }
 }
 

@@ -566,9 +566,13 @@ impl Value {
 		if argc == 0 || args.is_null() {
 		  return argv;
 		}
-		let args = ::std::slice::from_raw_parts(args, argc);
-		for arg in args {
-			argv.push(Value::copy_from(arg));
+		// `args` belongs to the engine, which does not promise the 8 byte alignment
+		// that Rust's `VALUE` (it carries a `u64`) requires - on x86 the engine hands
+		// out 4 byte aligned argument vectors. Building a `&[VALUE]` over that memory
+		// would break the reference's alignment guarantee, so walk the vector with
+		// raw pointer arithmetic: only the address is ever passed back to the engine.
+		for i in 0..argc {
+			argv.push(Value::copy_from(args.add(i)));
 		}
 		return argv;
 	}
