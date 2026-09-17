@@ -42,7 +42,8 @@ Desktop versions use Flutter or Sciter (deprecated) for GUI. This tutorial is fo
 
 Please download Sciter dynamic library yourself.
 
-[Windows](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
+[Windows (x64)](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
+[Windows (x86)](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x32/sciter.dll) |
 [Linux](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so) |
 [macOS](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.osx/libsciter.dylib)
 
@@ -52,12 +53,85 @@ Please download Sciter dynamic library yourself.
 
 - Install [vcpkg](https://github.com/microsoft/vcpkg), and set `VCPKG_ROOT` env variable correctly
 
-  - Windows: vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+  - Windows: `vcpkg install --triplet x64-windows-static` for 64 bit and `--triplet x86-windows-static` for 32 bit, from the repository root - the package list comes from `vcpkg.json`. See [How to Build on Windows](#how-to-build-on-windows).
   - Linux/macOS: vcpkg install libvpx libyuv opus aom
 
 - run `cargo run`
 
 ## [Build](https://rustdesk.com/docs/en/dev/build/)
+
+## How to Build on Windows
+
+Both architectures ship: `x64` and `x86`. Windows 7 machines are still commonly 32 bit, so the 32 bit build is not a leftover - keep both working.
+
+### Prerequisites
+
+- **Rust**: the repository pins 1.75.0 in `rust-toolchain.toml`, so `cargo` and `rustc` pick it up in this directory, and `--target i686-pc-windows-msvc` works without `rustup target add`. 1.78 dropped Windows 7/8/8.1 support for the `*-pc-windows-msvc` targets and a newer toolchain links imports that do not exist there, so the binary will not load on Windows 7. To use another toolchain on purpose, ask for it explicitly: `cargo +stable`.
+- **MSVC**: Visual Studio with the "Desktop development with C++" workload, plus LLVM/Clang with `LIBCLANG_PATH` pointing at its `bin` directory (`libs/scrap` builds bindings with it).
+- **vcpkg**: installed, with `VCPKG_ROOT` set and `vcpkg` on `PATH`.
+- **Sciter runtime**, see below.
+
+### Sciter runtime
+
+Sciter is not vendored. Download both builds and put them in the repository root:
+
+[Windows (x64)](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
+[Windows (x86)](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x32/sciter.dll)
+
+Rename them `sciter-x64.dll` and `sciter-x86.dll`. `build.rs` looks for `sciter-<arch>.dll` first and falls back to `sciter.dll`, and it copies a dll next to the executable only when its PE architecture matches the target. One `sciter.dll` cannot serve both architectures: shipping the wrong one fails at UI startup instead of at build time, and the suffixed names are what let the two sit side by side.
+
+### Install vcpkg
+
+```powershell
+git clone https://github.com/microsoft/vcpkg
+cd vcpkg
+git checkout 9e593bb18ea69cc5095e012465dcd675a822ed0d
+.\bootstrap-vcpkg.bat
+```
+
+Package versions come from the `vcpkg.json` manifest at the repository root, so nothing is installed by hand - run `vcpkg install` from there, once per architecture. `VCPKG_DEFAULT_HOST_TRIPLET` mirrors the triplet, as it does in CI:
+
+```powershell
+$env:VCPKG_DEFAULT_HOST_TRIPLET = "x64-windows-static"
+vcpkg install --triplet x64-windows-static
+$env:VCPKG_DEFAULT_HOST_TRIPLET = "x86-windows-static"
+vcpkg install --triplet x86-windows-static
+```
+
+### Build
+
+The UI is compiled into the binary under `--features inline`, from the generated `src/ui/inline.rs`. That file is not in the repository, so generate it once (and again after every change under `src/ui/`):
+
+```powershell
+py -3 res/inline-sciter.py
+```
+
+x64:
+
+```powershell
+cargo build --locked --release --features inline -j16
+```
+
+x86:
+
+```powershell
+cargo build --locked --release --features inline --target i686-pc-windows-msvc -j16
+```
+
+`x86` is our name for what rustc calls `i686-pc-windows-msvc`. Cargo keeps the two builds apart, in `target\release\` and `target\i686-pc-windows-msvc\release\`, so neither overwrites the other. Without `--features inline` the UI is loaded from `src/ui/` at run time, which also means the executable has to be started from the repository root - fine for UI work, not what a release should use.
+
+### Package
+
+`build.py` builds and packages in one step, one architecture per run:
+
+```powershell
+py -3 build.py --arch x64
+py -3 build.py --arch x86
+```
+
+Both packages are written to the repository root, as `gatedesk-<version>-x64-win7-install.exe` and `gatedesk-<version>-x86-win7-install.exe`. The architecture is part of the name because both land in the same directory. Add `--portable` for a self-extracting portable build instead of the installer. Without `--arch` the host architecture is built and the package keeps its unsuffixed name.
+
+The Flutter runner is x64 only, so `--arch x86` together with `--flutter` is rejected.
 
 ## How to Build on Linux
 
