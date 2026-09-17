@@ -105,7 +105,12 @@ lazy_static::lazy_static! {
     // Is server logic running. The server code can invoked to run by the main process if --server is not running.
     static ref SERVER_RUNNING: Arc<RwLock<bool>> = Default::default();
     static ref IS_MAIN: bool = std::env::args().nth(1).map_or(true, |arg| !arg.starts_with("--"));
-    static ref IS_CM: bool = std::env::args().nth(1) == Some("--cm".to_owned());
+    // Both windows play the connection manager's part and are told apart by how their page is
+    // drawn, not by what they are for: `--gd-panel` is the same role in the session panel skin.
+    static ref IS_CM: bool = matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--cm") | Some("--gd-panel")
+    );
 }
 
 pub struct SimpleCallOnReturn {
@@ -1064,6 +1069,23 @@ pub fn get_app_name() -> String {
 #[inline]
 pub fn is_rustdesk() -> bool {
     hbb_common::config::APP_NAME.read().unwrap().eq("RustDesk")
+}
+
+/// Whether this process was started with `--ui`, i.e. the user asked for the full main
+/// window instead of the headless default.
+///
+/// The window that answers a control request is a separate process, spawned with arguments
+/// of its own, so it cannot see how this one was started. The choice therefore has to be
+/// made here, while the arguments are still known, and passed on to that process.
+static UI_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_ui_mode(enabled: bool) {
+    UI_MODE.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn is_ui_mode() -> bool {
+    UI_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[inline]

@@ -206,6 +206,9 @@ pub fn core_main() -> Option<Vec<String>> {
     if args.is_empty() && !is_ui {
         args.push("--server".to_owned());
     }
+    // Only an explicit `--ui` keeps the connection manager window; the headless default
+    // answers control requests in the session panel. See `common::UI_MODE`.
+    crate::common::set_ui_mode(is_ui);
     if args.is_empty() || crate::common::is_empty_uni_link(&args[0]) {
         #[cfg(target_os = "macos")]
         {
@@ -738,6 +741,10 @@ pub fn core_main() -> Option<Vec<String>> {
         } else if args[0] == "--cm" {
             // call connection manager to establish connections
             // meanwhile, return true to call flutter window to show control panel
+            crate::ui_interface::start_option_status_sync();
+        } else if args[0] == "--gd-panel" {
+            // Session panel: what the headless default uses instead of the connection
+            // manager. Same option sync, because it shows the same permission toggles.
             crate::ui_interface::start_option_status_sync();
         } else if args[0] == "--whiteboard" {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]

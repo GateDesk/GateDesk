@@ -16,7 +16,7 @@ typedef void (*FUNC_RUSTDESK_FREE_ARGS)( char**, int);
 typedef int (*FUNC_RUSTDESK_GET_APP_NAME)(wchar_t*, int);
 typedef int (*FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)();
 /// Note: `--server`, `--service` are already handled in [core_main.rs].
-const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
+const std::vector<std::string> parameters_white_list = {"--install", "--cm", "--gd-panel"};
 
 const wchar_t* getWindowClassName();
 
@@ -134,6 +134,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, cmParam.size(), cmParam.c_str()) == 0) {
     is_cm_page = true;
   }
+  // The session panel stands in for the connection manager when the app was started without
+  // `--ui`, so it is the same kind of window: no taskbar entry, and a title of its own.
+  bool is_panel_page = false;
+  auto panelParam = std::string("--gd-panel");
+  if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, panelParam.size(), panelParam.c_str()) == 0) {
+    is_panel_page = true;
+  }
   bool is_install_page = false;
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, installParam.size(), installParam.c_str()) == 0) {
     is_install_page = true;
@@ -162,12 +169,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   std::wstring window_title;
   if (is_cm_page) {
     window_title = app_name + L" - Connection Manager";
+  } else if (is_panel_page) {
+    window_title = app_name + L" - Session";
   } else if (is_install_page) {
     window_title = app_name + L" - Install";
   } else {
     window_title = app_name;
   }
-  if (!window.CreateAndShow(window_title, origin, size, !is_cm_page)) {
+  if (!window.CreateAndShow(window_title, origin, size, !(is_cm_page || is_panel_page))) {
       return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

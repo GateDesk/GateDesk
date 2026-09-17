@@ -381,13 +381,10 @@ event click $(div.chaticon) {
 }
 
 function checkClickTime(callback) {
-    var click_callback_time = getTime();
-    handler.check_click_time(body.cid);
-    self.timer(120ms, function() {
-        var d = click_callback_time - handler.get_click_time();
-        if (d > 120)
-            callback();
-    });
+    // This window shows one session at a time, so the id is the selected tab's. The
+    // session panel draws a card per session and passes the id instead - see
+    // `checkClickTimeFor` in common.tis, which is the one implementation.
+    checkClickTimeFor(body.cid, callback);
 }
 
 function adaptSizeForChat() {

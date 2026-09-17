@@ -123,6 +123,13 @@ pub fn start(args: &mut [String]) {
             .flatten()
             .unwrap_or_default()
             == "true";
+    } else if args[0] == "--gd-panel" {
+        // Session panel: what a headless client answers control requests in. Same handler as
+        // the connection manager, because the page drives the same permission calls.
+        frame.register_behavior("connection-manager", move || {
+            Box::new(cm::SciterConnectionManager::new())
+        });
+        page = "panel.html";
     } else if (args[0] == "--connect"
         || args[0] == "--file-transfer"
         || args[0] == "--port-forward"
@@ -168,6 +175,8 @@ pub fn start(args: &mut [String]) {
             inline::get_index()
         } else if page == "cm.html" {
             inline::get_cm()
+        } else if page == "panel.html" {
+            inline::get_panel()
         } else if page == "install.html" {
             inline::get_install()
         } else {

@@ -38,6 +38,24 @@ function translate(name) {
     }
 }
 
+// Run `callback` only if this click looks like it came from the person at this machine
+// rather than from the peer.
+//
+// `handler.check_click_time` asks the server when it last forwarded a click from the
+// remote side; a click arriving inside that window is taken to be the peer driving the
+// local mouse and is dropped. That is what keeps a peer which already has the keyboard
+// from pressing the buttons that decide what it may do. Used by both windows that decide
+// such things: cm.tis (the connection manager) and panel.tis (the session panel).
+function checkClickTimeFor(id, callback) {
+    var click_callback_time = getTime();
+    handler.check_click_time(id);
+    self.timer(120ms, function() {
+        var d = click_callback_time - handler.get_click_time();
+        if (d > 120)
+            callback();
+    });
+}
+
 function hashCode(str) {
   var hash = 160 << 16 + 114 << 8 + 91; 
   for (var i = 0; i < str.length; i += 1) {

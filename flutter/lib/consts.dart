@@ -340,6 +340,15 @@ extension StringExtension on String {
 
 const Size kConnectionManagerWindowSizeClosedChat = Size(300, 490);
 const Size kConnectionManagerWindowSizeOpenChat = Size(700, 490);
+/// The session panel is the same window as the connection manager in the other skin; it is
+/// wider because the permission rows carry their own labels instead of icons.
+const Size kSessionPanelWindowSize = Size(380, 460);
+/// How long the local user has to answer a control request before the server denies it.
+///
+/// Mirrors `Connection::CONTROL_REQUEST_TIMEOUT` in `src/server/connection.rs` and
+/// `CONTROL_TIMEOUT_SECONDS` in `src/ui/panel.tis`. The countdown is display only: the server is
+/// what actually denies a request nobody answers, and it is the one that decides.
+const int kControlRequestTimeoutSeconds = 60;
 // Tabbar transition duration, now we remove the duration
 const Duration kTabTransitionDuration = Duration.zero;
 const double kEmptyMarginTop = 50;

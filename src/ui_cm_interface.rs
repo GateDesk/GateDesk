@@ -129,6 +129,13 @@ pub struct Client {
     pub id: i32,
     pub authorized: bool,
     pub disconnected: bool,
+    /// Whether a control request from this peer is waiting for the local user to answer.
+    ///
+    /// Carried here as well as pushed as an event, because a window that opens while the
+    /// request is already outstanding - or one that rebuilds its list from
+    /// `get_clients_state()` - would otherwise draw no prompt for a request the server is
+    /// already counting down.
+    pub pending_control: bool,
     pub is_file_transfer: bool,
     pub is_view_camera: bool,
     pub is_terminal: bool,
@@ -243,6 +250,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             id,
             authorized,
             disconnected: false,
+            pending_control: false,
             is_file_transfer,
             is_view_camera,
             is_terminal,
@@ -321,6 +329,23 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn show_elevation(&self, show: bool) {
         self.ui_handler.show_elevation(show);
+    }
+
+    /// Record that this peer's control request is (or is no longer) waiting for an answer,
+    /// then tell the window.
+    ///
+    /// Kept as an inherent method rather than only on the trait so that the recorded state
+    /// and the notification cannot come apart: `get_clients_state()` is what a window that
+    /// opens late rebuilds itself from, and it has to agree with the prompt the event asks
+    /// for.
+    #[cfg(not(target_os = "ios"))]
+    fn update_control_request(&self, id: i32, pending: bool) {
+        CLIENTS
+            .write()
+            .unwrap()
+            .get_mut(&id)
+            .map(|c| c.pending_control = pending);
+        self.ui_handler.update_control_request(id, pending);
     }
 
     #[cfg(not(target_os = "ios"))]

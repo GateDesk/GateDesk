@@ -768,6 +768,28 @@ class ServerModel with ChangeNotifier {
     }
   }
 
+  /// The peer asked to be let through the door, or that request was answered.
+  ///
+  /// The answer also arrives as a `false` for a request the server gave up on, which is why the
+  /// panel never keeps a prompt of its own: whatever this says is what the server believes.
+  void updateControlRequest(Map<String, dynamic> evt) {
+    try {
+      final id = int.parse(evt['id'] as String);
+      final pending = evt['pending'] as String == 'true';
+      final index = _clients.indexWhere((element) => element.id == id);
+      if (index == -1) return;
+      _clients[index].pendingControl = pending;
+      // Same timeout as `Connection::CONTROL_REQUEST_TIMEOUT`, so the countdown the prompt draws
+      // runs out together with the one that matters instead of a second earlier or later.
+      _clients[index].controlDeadline = pending
+          ? DateTime.now().add(const Duration(seconds: kControlRequestTimeoutSeconds))
+          : null;
+      notifyListeners();
+    } catch (e) {
+      debugPrint("updateControlRequest failed: $e");
+    }
+  }
+
   void androidUpdatekeepScreenOn() async {
     if (!isAndroid) return;
     var floatingWindowDisabled =
@@ -818,6 +840,16 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  /// The peer has asked to drive this machine's mouse and keyboard and nobody has answered yet.
+  /// Every session starts view-only, so this is what the panel's prompt is drawn from - see
+  /// [ServerModel.updateControlRequest] and `Connection::resolve_control_request` in
+  /// `src/server/connection.rs`.
+  bool pendingControl = false;
+  /// When [pendingControl] is answered by the server regardless, i.e. the end of the countdown
+  /// the prompt shows. Null when the request was already outstanding before this window opened,
+  /// in which case only the server still knows the deadline - the prompt then waits without a
+  /// number rather than inventing one. The server decides either way; this is display only.
+  DateTime? controlDeadline;
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -847,6 +879,9 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    // Only the server knows when an outstanding request expires, so a list rebuilt from
+    // `cmGetClientsState()` keeps the fact but not the deadline. See [controlDeadline].
+    pendingControl = json['pending_control'] ?? pendingControl;
   }
 
   Map<String, dynamic> toJson() {
@@ -872,6 +907,7 @@ class Client {
     data['from_switch'] = fromSwitch;
     data['in_voice_call'] = inVoiceCall;
     data['incoming_voice_call'] = incomingVoiceCall;
+    data['pending_control'] = pendingControl;
     return data;
   }
 

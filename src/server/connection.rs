@@ -302,6 +302,12 @@ pub struct Connection {
     /// answer it in the connection manager. Stops the prompt being raised again
     /// on every option message the peer sends.
     control_requested: bool,
+    /// When the outstanding control request expires.
+    ///
+    /// Answering a request is a security decision, so silence must not read as consent: a
+    /// prompt nobody answers is denied once this passes rather than leaving the peer
+    /// waiting for ever.
+    control_request_deadline: Option<Instant>,
     video_ack_required: bool,
     server_audit_conn: String,
     server_audit_file: String,
@@ -508,6 +514,7 @@ impl Connection {
             tx_input,
             control_authorized: false,
             control_requested: false,
+            control_request_deadline: None,
             video_ack_required: false,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
@@ -650,26 +657,14 @@ impl Connection {
                         ipc::Data::ControlResponse { accepted } => {
                             // The local user answered the peer's control request.
                             // Approval lasts for this session only.
-                            conn.control_requested = false;
-                            conn.control_authorized = accepted;
-                            if accepted {
-                                conn.disable_keyboard = false;
-                            }
-                            conn.send_permission(
-                                Permission::Keyboard,
-                                conn.peer_input_enabled(),
-                            )
-                            .await;
-                            if accepted {
-                                if let Some(s) = conn.server.upgrade() {
-                                    s.write().unwrap().subscribe(
-                                        NAME_CURSOR,
-                                        conn.inner.clone(),
-                                        conn.peer_keyboard_enabled() || conn.show_remote_cursor,
-                                    );
-                                }
-                            }
-                            conn.send_to_cm(ipc::Data::ControlRequest { pending: false });
+                            conn.resolve_control_request(accepted).await;
+                            crate::audit::record(
+                                if accepted { "control.approve" } else { "control.deny" },
+                                "customer",
+                                conn.lr.session_id,
+                                if accepted { "ok" } else { "denied" },
+                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                            );
                         }
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
@@ -1067,6 +1062,21 @@ impl Connection {
                 _ = second_timer.tick() => {
                     #[cfg(windows)]
                     conn.portable_check();
+                    // A control request the local user never answered. Denying it keeps the
+                    // session read-only instead of leaving the peer waiting, and records that
+                    // the decision came from the timeout rather than from a person.
+                    if let Some(deadline) = conn.control_request_deadline {
+                        if Instant::now() >= deadline {
+                            conn.resolve_control_request(false).await;
+                            crate::audit::record(
+                                "control.timeout",
+                                "customer",
+                                conn.lr.session_id,
+                                "timeout",
+                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                            );
+                        }
+                    }
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
                     if let Some((instant, minute)) = conn.auto_disconnect_timer.as_ref() {
                         if instant.elapsed().as_secs() > minute * 60 {
@@ -2207,6 +2217,34 @@ impl Connection {
     #[inline]
     fn peer_input_enabled(&self) -> bool {
         self.peer_keyboard_enabled() && self.control_authorized
+    }
+
+    /// How long the local user has to answer a control request before it is denied.
+    const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Settle an outstanding control request, approving or denying it.
+    ///
+    /// The local user answering the prompt and the timeout above both come through here, so
+    /// either way the session ends up in one state rather than two that can drift apart.
+    async fn resolve_control_request(&mut self, accepted: bool) {
+        self.control_requested = false;
+        self.control_request_deadline = None;
+        self.control_authorized = accepted;
+        if accepted {
+            self.disable_keyboard = false;
+        }
+        self.send_permission(Permission::Keyboard, self.peer_input_enabled())
+            .await;
+        if accepted {
+            if let Some(s) = self.server.upgrade() {
+                s.write().unwrap().subscribe(
+                    NAME_CURSOR,
+                    self.inner.clone(),
+                    self.peer_keyboard_enabled() || self.show_remote_cursor,
+                );
+            }
+        }
+        self.send_to_cm(ipc::Data::ControlRequest { pending: false });
     }
 
     fn clipboard_enabled(&self) -> bool {
@@ -4846,6 +4884,8 @@ impl Connection {
                     self.disable_keyboard = true;
                     if !self.control_requested {
                         self.control_requested = true;
+                        self.control_request_deadline =
+                            Some(Instant::now() + Self::CONTROL_REQUEST_TIMEOUT);
                         self.send_to_cm(ipc::Data::ControlRequest { pending: true });
                     }
                 } else {
@@ -6218,7 +6258,14 @@ async fn start_ipc(
         stream = Some(s);
     }
     if stream.is_none() {
-        let args = vec!["--cm"];
+        // Which window answers a control request follows how this process was started: an
+        // explicit `--ui` keeps the connection manager, the headless default gets the session
+        // panel. The spawned process cannot see our arguments, so it is told which to use.
+        let args = if crate::common::is_ui_mode() {
+            vec!["--cm"]
+        } else {
+            vec!["--gd-panel"]
+        };
         let run_done;
         if crate::platform::is_root() {
             let mut res = Ok(None);

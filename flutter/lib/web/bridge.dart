@@ -1402,6 +1402,11 @@ class RustdeskImpl {
     throw UnimplementedError("cmSwitchPermission");
   }
 
+  Future<void> cmRespondControlRequest(
+      {required int connId, required bool accepted, dynamic hint}) {
+    throw UnimplementedError("cmRespondControlRequest");
+  }
+
   bool cmCanElevate({dynamic hint}) {
     throw UnimplementedError("cmCanElevate");
   }

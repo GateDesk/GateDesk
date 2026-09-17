@@ -10,6 +10,7 @@ import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
+import 'package:flutter_hbb/desktop/pages/session_panel_page.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
@@ -104,6 +105,11 @@ Future<void> main(List<String> args) async {
     desktopType = DesktopType.cm;
     await windowManager.ensureInitialized();
     runConnectionManagerScreen();
+  } else if (args.isNotEmpty && args.first == '--gd-panel') {
+    debugPrint("--gd-panel started");
+    desktopType = DesktopType.cm;
+    await windowManager.ensureInitialized();
+    runSessionPanelScreen();
   } else if (args.contains('--install')) {
     runInstallPage();
   } else {
@@ -302,6 +308,40 @@ void runConnectionManagerScreen() async {
 }
 
 bool _isCmReadyToShow = false;
+
+/// The window that answers control requests when the app was started without `--ui`.
+///
+/// It takes the connection manager's place: same [DesktopType], same [ServerModel], so how a
+/// request reaches the screen is unchanged. What differs is the page, and that this window may
+/// not hide itself - it is the only place a request can be answered, so a prompt must never end
+/// up behind a window nobody can see.
+void runSessionPanelScreen() async {
+  await initEnv(kAppTypeConnectionManager);
+  // The shared CM lifecycle code treats a window it is allowed to hide as one it may hide, and
+  // that is what `hideCm` decides: with it set, `ServerModel` skips the auto-minimize three
+  // seconds after a session is accepted and the auto hide/show in its 500ms poll, and the panel
+  // is left on screen until the last session is gone. The two places that hide a window anyway -
+  // `ServerModel.onClientRemove` and `updateClientState`, when the last session goes - do nothing
+  // here either, because they go through `hideCmWindow`, and that one only acts once
+  // [_isCmReadyToShow] is set, which this function never does.
+  gFFI.serverModel.hideCm = true;
+  _runApp('', const SessionPanelPage(), MyTheme.currentThemeMode());
+  WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
+      size: kSessionPanelWindowSize, alwaysOnTop: true);
+  await windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.setSizeAlignment(
+        kSessionPanelWindowSize, Alignment.topRight);
+    // Same as the connection manager: this window belongs to the headless shape of the app, and
+    // on macOS that shape has no Dock icon. No-op elsewhere.
+    bind.mainHideDock();
+    await windowManager.show();
+    await windowManager.focus();
+    await windowManager.setOpacity(1);
+  });
+  setResizable(false);
+  // Start the uni links handler and redirect links to Native, not for Flutter.
+  listenUniLinks(handleByFlutter: false);
+}
 
 showCmWindow({bool isStartup = false}) async {
   if (isStartup) {

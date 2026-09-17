@@ -1,0 +1,356 @@
+// Session panel: the window a headless client answers control requests in.
+//
+// It implements the same handler interface as the connection manager (see src/ui/cm.rs), so
+// the Rust side needs nothing panel-specific - only the rendering differs. The counterpart
+// for `--ui` is cm.tis.
+
+// Mirrors `Connection::CONTROL_REQUEST_TIMEOUT` in src/server/connection.rs. The countdown is
+// display only: the server is what actually denies a request nobody answers.
+const CONTROL_TIMEOUT_SECONDS = 60;
+
+var body;
+var connections = [];
+var countdown_timer = null;
+var is_privacy_mode_supported = handler.get_supported_privacy_mode_impls() != '[]';
+// With `approve-mode` on password the peer is already past the door by the time it appears here,
+// so there is nothing to accept. Same rule as cm.tis.
+var show_accept = handler.get_option('approve-mode') != 'password';
+
+// The GateDesk mark, inlined. A page compiled into the binary has no directory to resolve
+// res/logo.svg against, so the few paths it needs live here.
+var svg_logo = <svg xmlns="http://www.w3.org/2000/svg" viewBox="66.993 897.484 26 26"><path d="m89.318 903.552-2.135 2.122c-.376.337-.558.879-.347 1.337 1.422 2.976.882 6.524-1.452 8.856-2.335 2.331-5.887 2.87-8.866 1.449-.439-.197-.954-.03-1.292.312l-2.17 2.167a1.154 1.154 0 0 0 .208 1.81 13.005 13.005 0 0 0 15.91-1.912 12.97 12.97 0 0 0 1.956-15.887 1.154 1.154 0 0 0-1.812-.254zm-18.467-2.305a12.969 12.969 0 0 0-2.02 15.885 1.154 1.154 0 0 0 1.812.254l2.124-2.11c.385-.336.572-.884.359-1.348-1.423-2.976-.884-6.524 1.451-8.856 2.334-2.332 5.887-2.871 8.866-1.45.434.194.942.033 1.281-.3l2.182-2.18a1.152 1.152 0 0 0-.208-1.81 13.009 13.009 0 0 0-15.893 1.973z"/></svg>;
+
+function find_connection(id) {
+    var out = null;
+    connections.map(function(c) {
+        if (c.id == id) out = c;
+    });
+    return out;
+}
+
+// Every card carries its connection id, so one set of handlers can serve all of them.
+function connection_of(element) {
+    var node = element;
+    while (node) {
+        if (node.attributes) {
+            var v = node.attributes["data-conn-id"];
+            if (v) return find_connection(parseInt(v));
+        }
+        node = node.parent;
+    }
+    return null;
+}
+
+function resolve_connection(element) {
+    var c = element ? connection_of(element) : null;
+    if (!c && connections.length == 1) c = connections[0];
+    return c;
+}
+
+function seconds_left(c) {
+    if (!c.pending_control || !c.control_deadline) return 0;
+    var left = (c.control_deadline - getTime()) / 1000;
+    return left > 0 ? Math.ceil(left) : 0;
+}
+
+function any_pending() {
+    var out = false;
+    connections.map(function(c) {
+        if (c.pending_control) out = true;
+    });
+    return out;
+}
+
+function ensure_countdown() {
+    if (countdown_timer) return;
+    countdown_timer = self.timer(1s, function() {
+        body.update();
+        if (!any_pending()) {
+            countdown_timer.stop();
+            countdown_timer = null;
+        }
+    });
+}
+
+function render_permissions(c) {
+    var rows = [
+        ["keyboard", "Enable keyboard/mouse", c.keyboard, true],
+        ["clipboard", "Enable clipboard", c.clipboard, true],
+        ["audio", "Enable audio", c.audio, true],
+        ["file", "Enable file copy and paste", c.file, true],
+        ["restart", "Enable remote restart", c.restart, true],
+        ["recording", "Enable recording session", c.recording, true],
+        ["block_input", "Enable blocking user input", c.block_input, is_win],
+        ["privacy_mode", "Enable privacy mode", c.privacy_mode, is_privacy_mode_supported]
+    ];
+    return <div .perms>
+        <div .perm-title>{translate('Permissions')}</div>
+        {rows.map(function(r) {
+            if (!r[3]) return <div style="display:none" />;
+            return <div class={r[2] ? "perm on" : "perm"} .perm-name={r[0]}>
+                <div .perm-name>{translate(r[1])}</div>
+                <div .switch><div .switch-knob /></div>
+            </div>;
+        })}
+    </div>;
+}
+
+function render_request(c) {
+    var left = seconds_left(c);
+    var pct = left * 100 / CONTROL_TIMEOUT_SECONDS;
+    return <div .request>
+        <div .request-head>
+            <div .request-icon>{"!"}</div>
+            <div .request-title>{translate('A remote user requests to control your mouse and keyboard')}</div>
+        </div>
+        <div .progress><div .progress-bar style={"width: " + pct + "%;"} /></div>
+        <div .request-note>{translate('Timeout') + ": " + left + "s"}</div>
+        <div .request-actions>
+            <button .ghost #gd-deny>{translate('Deny')}</button>
+            <button .primary #gd-allow>{translate('Allow')}</button>
+        </div>
+    </div>;
+}
+
+// What the peer is asking for before any session exists. The panel stands in for the connection
+// manager, so it has to be able to let a peer in as well: nothing else is listening for this
+// peer's `Login` when the app was started without `--ui`.
+function render_login(c) {
+    return <div .request>
+        <div .request-head>
+            <div .request-icon>{"?"}</div>
+            <div .request-title>{translate('Request access to your device') + "..."}</div>
+        </div>
+        <div .request-actions>
+            <button .ghost #gd-dismiss>{translate('Dismiss')}</button>
+            {show_accept ? <button .primary #gd-accept>{translate('Accept')}</button> : ""}
+        </div>
+    </div>;
+}
+
+function render_card(c) {
+    var connected = c.authorized && !c.disconnected;
+    var state = c.disconnected ? translate('Disconnected') :
+        (connected ? translate('Connected') : translate('Waiting'));
+    return <div .card data-conn-id={c.id.toString()}>
+        <div .peer>
+            {c.avatar ? <img .avatar src={c.avatar} /> :
+                <div .avatar style={"background: " + string2RGB(c.name, 1)}>{c.name[0].toUpperCase()}</div>}
+            <div .peer-text>
+                <div .peer-name>{c.name}</div>
+                <div .peer-id>{c.peer_id}</div>
+            </div>
+            <div class={connected ? "pill on" : "pill"}>{state}</div>
+        </div>
+        {!c.authorized && !c.disconnected ? render_login(c) : ""}
+        {connected && c.pending_control ? render_request(c) : ""}
+        {connected ? render_permissions(c) : ""}
+        <div .card-footer>
+            {c.disconnected ? <button .ghost #gd-remove>{translate('Close')}</button> : ""}
+            {connected ? <button .primary #gd-close>{translate('Disconnect')}</button> : ""}
+        </div>
+    </div>;
+}
+
+class Body: Reactor.Component {
+    function this() {
+        body = this;
+    }
+
+    function render() {
+        return <div .panel>
+            <div .brand>
+                <div .brand-logo>{svg_logo}</div>
+                <div>
+                    <div .brand-name>{"GateDesk"}</div>
+                    <div .brand-sub>{translate('Permissions')}</div>
+                </div>
+            </div>
+            <div .cards>
+                {connections.length == 0 ?
+                    <div .empty>{"Waiting for new connection ..."}</div> :
+                    connections.map(render_card)}
+            </div>
+        </div>;
+    }
+
+    event click $(button#gd-allow) (evt, el) {
+        var c = resolve_connection(el);
+        if (!c) return;
+        checkClickTimeFor(c.id, function() {
+            c.pending_control = false;
+            body.update();
+            handler.respond_control_request(c.id, true);
+        });
+    }
+
+    event click $(button#gd-deny) (evt, el) {
+        var c = resolve_connection(el);
+        if (!c) return;
+        checkClickTimeFor(c.id, function() {
+            c.pending_control = false;
+            body.update();
+            handler.respond_control_request(c.id, false);
+        });
+    }
+
+    event click $(div.perm) (evt, el) {
+        var c = resolve_connection(el);
+        if (!c) return;
+        var name = el.attributes["perm-name"];
+        if (!name) return;
+        var on = !c[name];
+        checkClickTimeFor(c.id, function() {
+            c[name] = on;
+            body.update();
+            handler.switch_permission(c.id, name, on);
+        });
+    }
+
+    event click $(button#gd-close) (evt, el) {
+        var c = resolve_connection(el);
+        if (c) checkClickTimeFor(c.id, function() { handler.close(c.id); });
+    }
+
+    // Let the peer in. The server answers by sending the connection again with `authorized`
+    // set; that echo is what the row really follows, the local flip is only so the button does
+    // not sit there inviting a second click. Same as cm.tis.
+    event click $(button#gd-accept) (evt, el) {
+        var c = resolve_connection(el);
+        if (!c) return;
+        checkClickTimeFor(c.id, function() {
+            c.authorized = true;
+            body.update();
+            handler.authorize(c.id);
+        });
+    }
+
+    // Refuse the peer's request to connect at all.
+    event click $(button#gd-dismiss) (evt, el) {
+        var c = resolve_connection(el);
+        if (c) checkClickTimeFor(c.id, function() { handler.close(c.id); });
+    }
+
+    // Drop a session that has already ended. Nothing else will ever remove it, so the panel
+    // would sit there on top of the desktop listing a peer that is long gone.
+    event click $(button#gd-remove) (evt, el) {
+        var c = resolve_connection(el);
+        if (!c) return;
+        checkClickTimeFor(c.id, function() {
+            handler.remove_disconnected_connection(c.id);
+            var i = connections.indexOf(c);
+            if (i >= 0) connections.splice(i, 1);
+            if (connections.length > 0) {
+                body.update();
+            } else {
+                handler.quit();
+            }
+        });
+    }
+}
+
+$(body).content(<Body />);
+
+// --- Rust -> page, the interface src/ui/cm.rs calls into ---
+
+handler.addConnection = function(id, is_file_transfer, is_view_camera, is_terminal, port_forward,
+    peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, restart, recording,
+    block_input, privacy_mode) {
+    var conn = find_connection(id);
+    if (!name) name = "NA";
+    if (conn) {
+        conn.authorized = authorized;
+        conn.keyboard = keyboard;
+        conn.clipboard = clipboard;
+        conn.audio = audio;
+        conn.file = file;
+        conn.restart = restart;
+        conn.recording = recording;
+        conn.block_input = block_input;
+        conn.privacy_mode = privacy_mode;
+        body.update();
+        return;
+    }
+    conn = {
+        id: id, is_file_transfer: is_file_transfer, is_view_camera: is_view_camera,
+        is_terminal: is_terminal, port_forward: port_forward, peer_id: peer_id,
+        name: name, avatar: avatar, authorized: authorized,
+        keyboard: keyboard, clipboard: clipboard, audio: audio, file: file,
+        restart: restart, recording: recording, block_input: block_input,
+        privacy_mode: privacy_mode, pending_control: false, control_deadline: 0,
+        disconnected: false
+    };
+    connections.push(conn);
+    body.update();
+    bring_to_top();
+}
+
+handler.removeConnection = function(id, close) {
+    var i = -1;
+    connections.map(function(c, idx) {
+        if (c.id == id) i = idx;
+    });
+    if (i < 0) return;
+    if (close) {
+        connections.splice(i, 1);
+    } else {
+        connections[i].disconnected = true;
+        connections[i].pending_control = false;
+    }
+    body.update();
+}
+
+handler.updateControlRequest = function(id, pending) {
+    var c = find_connection(id);
+    if (!c) return;
+    c.pending_control = pending;
+    // Start the countdown when the request arrives; it is only a display of the server's own
+    // deadline, so both sides can drift by a second without the outcome changing.
+    c.control_deadline = pending ? getTime() + CONTROL_TIMEOUT_SECONDS * 1000 : 0;
+    body.update();
+    if (pending) {
+        ensure_countdown();
+        bring_to_top();
+    }
+}
+
+handler.newMessage = function(id, text) {
+    // Chat is not part of the panel; the message is still recorded so nothing is lost if it
+    // is answered from another window.
+    var c = find_connection(id);
+    if (!c) return;
+    if (!c.msgs) c.msgs = [];
+    c.msgs.push(text);
+}
+
+handler.changeTheme = function(dark) {
+    // Same idiom as index.tis: sciter's attributes collection, not the DOM classList.
+    var root_element = self.document ? self.document.documentElement : null;
+    if (root_element) {
+        root_element.attributes.toggleClass("darktheme", dark == "true" || dark == true);
+    }
+}
+
+handler.changeLanguage = function() {
+    body.update();
+}
+
+handler.showElevation = function(show) {}
+
+handler.updateVoiceCallState = function(id, in_voice_call, incoming_voice_call) {}
+
+function bring_to_top() {
+    if (view.windowState == View.WINDOW_HIDDEN || view.windowState == View.WINDOW_MINIMIZED) {
+        view.windowState = View.WINDOW_SHOWN;
+    }
+    view.windowTopmost = true;
+    view.windowTopmost = false;
+}
+
+function self.ready() {
+    var (sw, sh) = view.screenBox(#workarea, #dimension);
+    var w = scaleIt(380);
+    var h = scaleIt(460);
+    view.move(sw - w, 0, w, h);
+}
+

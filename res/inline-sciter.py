@@ -33,6 +33,10 @@ cm = open('src/ui/cm.html').read() \
     .replace('@import url(cm.css);', open('src/ui/cm.css').read()) \
     .replace('include "cm.tis";', open('src/ui/cm.tis').read())
 
+panel = open('src/ui/panel.html').read() \
+    .replace('@import url(panel.css);', open('src/ui/panel.css').read()) \
+    .replace('include "panel.tis";', open('src/ui/panel.tis').read())
+
 
 def compress(s):
     s = s.replace("\r\n", "\n")
@@ -49,6 +53,7 @@ with open('src/ui/inline.rs', 'wt') as fh:
     fh.write('const _CHATBOX: ' + compress(strip(chatbox)) + ';\n')
     fh.write('const _INSTALL: ' + compress(strip(install)) + ';\n')
     fh.write('const _CONNECTION_MANAGER: ' + compress(strip(cm)) + ';\n')
+    fh.write('const _PANEL: ' + compress(strip(panel)) + ';\n')
     fh.write('''
 fn get(data: &[u8]) -> String {
     String::from_utf8_lossy(data).to_string()
@@ -78,5 +83,9 @@ pub fn get_chatbox() -> String {
 #[inline]
 pub fn get_cm() -> String {
     replace(&_CONNECTION_MANAGER[..])
+}
+#[inline]
+pub fn get_panel() -> String {
+    replace(&_PANEL[..])
 }
 ''')
