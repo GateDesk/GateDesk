@@ -317,6 +317,62 @@ pub enum SwitchSidesUuidAction {
     Consume,
 }
 
+/// One session-level action asked for by a local API client.
+///
+/// The variants are named after what the person at this machine would click, so
+/// that a request arriving over the local HTTP API and a click in the session
+/// panel cannot drift apart: both end up in the same connection manager call.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "t", content = "c")]
+pub enum LocalApiAction {
+    /// Let a peer in, or refuse it: the panel's Accept / Dismiss.
+    Approve { accept: bool },
+    /// Answer a pending control request: the panel's Allow / Deny.
+    Control { accept: bool },
+    /// Flip one permission: the panel's switches.
+    Permission { name: String, enabled: bool },
+    /// End a session: the panel's Disconnect.
+    Terminate,
+    /// Drop a session that has already ended: the panel's Close.
+    Dismiss,
+    /// Read the session list, as the panel's cards show it.
+    Sessions,
+}
+
+/// A local API client asking the connection manager to act.
+///
+/// Unlike the messages a session's own connection sends, the caller here is not
+/// bound to a session, so the target is named rather than taken from the
+/// connection the message arrived on.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocalApiCall {
+    /// Session to act on. Ignored by `Sessions`.
+    pub id: i32,
+    pub action: LocalApiAction,
+}
+
+/// The connection manager's answer to a [`LocalApiCall`].
+///
+/// The local API is request/response because its caller has no window to look at
+/// and no other way to tell "done" from "no such session".
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "t", content = "c")]
+pub enum LocalApiReply {
+    /// Carried out. `data` is JSON for the actions that read (`Sessions`), empty
+    /// otherwise.
+    Ok { data: String },
+    /// The request does not make sense - an unknown permission name, say.
+    BadRequest { reason: String },
+    /// No session carries that id.
+    NotFound,
+    /// The session exists but is not in a state this action applies to:
+    /// answering a control request nobody made, or letting in a peer that is
+    /// already through the door.
+    Conflict { reason: String },
+    /// Understood and applicable, but could not be carried out.
+    Failed { reason: String },
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "t", content = "c")]
 pub enum Data {
@@ -365,6 +421,14 @@ pub enum Data {
     ControlResponse {
         accepted: bool,
     },
+    /// A local API client asking the connection manager to act on a session.
+    ///
+    /// Sent to the connection manager and answered on the same connection, because
+    /// the caller - the HTTP API on 127.0.0.1:21120 - is not a session and has no
+    /// other channel to it. See `crate::http_api`.
+    LocalApi(LocalApiCall),
+    /// The connection manager's answer to the `LocalApi` above.
+    LocalApiReply(LocalApiReply),
     Close,
     #[cfg(windows)]
     SAS,

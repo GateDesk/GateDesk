@@ -650,6 +650,17 @@ impl Connection {
                             if !conn.send_logon_response_and_keep_alive().await {
                                 break;
                             }
+                            // Recorded here rather than where the request came from, so
+                            // that a click in the session panel and a call over the local
+                            // HTTP API leave the same trace, and so that the trace carries
+                            // the session and the peer this was about.
+                            crate::audit::record(
+                                "login.approve",
+                                "customer",
+                                conn.lr.session_id,
+                                "ok",
+                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                            );
                             if conn.port_forward_socket.is_some() {
                                 break;
                             }
@@ -670,6 +681,22 @@ impl Connection {
                             conn.chat_unanswered = false; // seen
                             conn.file_transferred = false; //seen
                             conn.send_close_reason_no_retry("").await;
+                            // Refusing a peer that never got through the door and ending
+                            // a session that was running arrive here as the same message,
+                            // so the state is what tells them apart - and they are not the
+                            // same event to an audit reader.
+                            let authorized = conn.authorized;
+                            crate::audit::record(
+                                if authorized {
+                                    "session.terminate"
+                                } else {
+                                    "login.deny"
+                                },
+                                "customer",
+                                conn.lr.session_id,
+                                if authorized { "ok" } else { "denied" },
+                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                            );
                             conn.on_close("connection manager", true).await;
                             break;
                         }
@@ -813,6 +840,21 @@ impl Connection {
                                 conn.privacy_mode = enabled;
                                 conn.send_permission(Permission::PrivacyMode, enabled).await;
                             }
+                            // Recorded after all of the above, which is also what makes
+                            // it honest: a privacy-mode turn-off that failed rolls the
+                            // toggle back and `continue`s, so a change that did not
+                            // happen leaves no trace here.
+                            crate::audit::record(
+                                "permission.change",
+                                "customer",
+                                conn.lr.session_id,
+                                "ok",
+                                serde_json::json!({
+                                    "peer_id": conn.lr.my_id,
+                                    "name": name,
+                                    "enabled": enabled,
+                                }),
+                            );
                         }
                         ipc::Data::RawMessage(bytes) => {
                             allow_err!(conn.stream.send_raw(bytes).await);

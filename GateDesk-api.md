@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.7（2026-09-10）
+> 版本：1.8（2026-09-17）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `gatedesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -14,6 +14,13 @@ GateDesk 客户端进程内嵌一个仅限本机访问的 HTTP 服务，供**本
 - 进程形态：GateDesk 主界面进程 或 `--server` 服务进程（任一先启动者占用端口，后者自动禁用）
 - 实现文件：`gatedesk/src/http_api.rs`
 - 依赖：`tiny_http`（Cargo.toml `[dependencies]`）
+
+接口分两类，接入前先分清本机在这段业务里是哪一端：
+
+| 类别 | 本机角色 | 端点 | 状态存放在 |
+|------|---------|------|-----------|
+| 主动连接 | 控制端 | `/id`、`/connect`、`/disconnect`、`/password`、`/voice`、`/status` | 本进程（含本 API 启动的会话窗口） |
+| 会话与批准 | **被控端** | `/sessions`、`/approve`、`/control`、`/permission`、`/terminate`、`/dismiss` | 连接管理器进程（§6.7）；本 API 通过进程内通道与其通信 |
 
 ## 2. 安全要求（设计硬约束）
 
@@ -67,6 +74,7 @@ Authorization: Bearer <token>
 - 响应格式：`application/json; charset=utf-8`
 - 跨域（v1.7）：不再无条件回显 `Access-Control-Allow-Origin: *`。对携带 `Origin` 头的浏览器请求，仅当来源受信（localhost / 127.0.0.1 任意端口，或 `[options] api-cors-origin` 配置的来源，逗号分隔）时才回显该来源；无 `Origin` 的非浏览器请求（curl 等）照常响应但不带 CORS 头；预检 `OPTIONS` 仅对受信来源返回 204 并声明 `GET, POST, OPTIONS` 与 `Authorization, Content-Type`，非受信来源直接 403。
 - 查询参数支持 URL 百分号编码（浏览器 `fetch` 自动编码后服务端正确解码）
+- 会话接口寻址（v1.8）：`/sessions` 之外的会话类接口以 `id`（整数，取自 `/sessions`）指定目标，**不使用设备 ID** —— 同一对端可能同时存在多个会话（远程桌面 + 文件传输），只凭设备 ID 无法区分
 
 ## 6. 接口列表
 
@@ -244,7 +252,205 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
 {"ok":true,"enabled":true}
 ```
 
-### 6.7 操作级审计（桌面端内部机制，非本 API 端点）
+### 6.7 会话与批准（受控端）
+
+本节接口驱动的是**本机作为被控端**的会话：把对端放进来、应答它的控制请求、开关它可用的权限、结束会话。这些状态由连接管理器进程持有，接口内部走进程内通道（`_cm`），与受控端会话面板上点按钮是**同一批动作**，因此接口与面板不会出现两种状态 —— 用接口批准后，面板上对应的提示会同步消失。
+
+> 设计前提：接入后**默认只读**，控制端要操作本机键鼠必须由本机同意 —— 面板上有人点，或本节接口代替人做决定。
+>
+> **因此：持有 token 即可代替本机用户批准接入与控制。** token 的保管按 §2 执行。
+>
+> **超时与重试**：接口调用连接管理器有 2 秒上界，超时返回 504。极端情况下可能出现「动作已在本机生效、但调用方收到超时」—— 本节接口都是幂等的（重复放行 → 409，结束一个已经结束的会话 → 409），可以直接重试，或先查 `/sessions` 确认。
+
+#### 6.7.1 列出当前会话
+
+```
+GET /sessions
+```
+
+返回会话面板上正显示的内容：每个已接入或正在请求接入的对端，及其权限、是否等待批准、是否有待应答的控制请求。
+
+**成功响应（200）**
+
+```json
+{
+  "ok": true,
+  "sessions": [
+    {
+      "id": 3,
+      "authorized": true,
+      "disconnected": false,
+      "pending_control": false,
+      "peer_id": "123456789",
+      "name": "张三",
+      "avatar": "",
+      "is_file_transfer": false,
+      "is_view_camera": false,
+      "is_terminal": false,
+      "port_forward": "",
+      "keyboard": true,
+      "clipboard": false,
+      "audio": false,
+      "file": false,
+      "restart": false,
+      "recording": false,
+      "block_input": false,
+      "privacy_mode": false,
+      "from_switch": false,
+      "in_voice_call": false,
+      "incoming_voice_call": false
+    }
+  ]
+}
+```
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| id | int | 会话标识，其余接口用它寻址 |
+| authorized | bool | 是否已放行；`false` 且 `disconnected: false` 即**正在请求接入** |
+| disconnected | bool | 会话是否已结束（仍留在列表里，可用 `/dismiss` 清理） |
+| pending_control | bool | 是否有**待应答的控制请求**（对应面板上的「允许 / 拒绝」提示） |
+| peer_id | string | 对端设备 ID |
+| name | string | 对端名称 |
+| other fields | — | 各项权限的当前值，与面板上的开关一一对应 |
+
+本机没有任何会话、也没有会话面板窗口时，**没有连接管理器可以问**，接口返回 503（见 §7）；会话刚结束、面板窗口还在时返回 `[]`。
+
+#### 6.7.2 批准或拒绝接入
+
+```
+POST /approve
+```
+
+无人值守时这是会话能开始的唯一途径：本机不开 `--ui` 时，会话面板是唯一在听对端登录请求的窗口，平台不代为应答则只能由人点。
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | int | 会话标识 |
+| accept | 是 | bool | `true` 放行；`false` 拒绝并断开 |
+
+**请求示例**
+
+```powershell
+curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":3,\"accept\":true}"
+```
+
+**成功响应（200）**
+
+```json
+{"ok":true,"result":{"peer_id":"123456789"}}
+```
+
+**审计**：放行 → `login.approve`；拒绝 → `login.deny`（见 §6.8）。
+
+#### 6.7.3 应答控制请求
+
+```
+POST /control
+```
+
+对端请求接管本机键鼠时（`/sessions` 中 `pending_control: true`）由本机决定是否放行。
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | int | 会话标识 |
+| accept | 是 | bool | `true` 允许控制；`false` 拒绝（会话保持只读） |
+
+**请求示例**
+
+```powershell
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":3,\"accept\":true}"
+```
+
+**成功响应（200）**
+
+```json
+{"ok":true,"result":{"peer_id":"123456789"}}
+```
+
+**超时**：控制请求有 **60 秒**时限，无人应答由服务端按拒绝处理，会话保持只读 —— **静默不等于同意**。超时记为 `control.timeout`。
+
+**审计**：允许 → `control.approve`；拒绝 → `control.deny`；超时 → `control.timeout`。
+
+#### 6.7.4 开关权限
+
+```
+POST /permission
+```
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | int | 会话标识 |
+| name | 是 | string | `keyboard` / `clipboard` / `audio` / `file` / `restart` / `recording` / `block_input` / `privacy_mode` |
+| enabled | 是 | bool | 目标状态 |
+
+**请求示例**
+
+```powershell
+curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"name\":\"clipboard\",\"enabled\":true}"
+```
+
+**成功响应（200）**
+
+```json
+{"ok":true,"result":{"peer_id":"123456789"}}
+```
+
+**边界**
+
+- `block_input` 仅 Windows 可用；`privacy_mode` 需目标平台有对应实现。不支持时返回 400。
+- 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，除 `keyboard` 外一律拒绝，返回 409。
+- 打开 `keyboard` **不等于**授权控制：控制授权是独立闸门（§6.7.3），两者都满足才真正放开输入。
+
+**审计**：`permission.change`（见 §6.8）。
+
+#### 6.7.5 结束会话
+
+```
+POST /terminate
+```
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | int | 会话标识 |
+
+**请求示例**
+
+```powershell
+curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d "{\"id\":3}"
+```
+
+**成功响应（200）**
+
+```json
+{"ok":true,"result":{"peer_id":"123456789"}}
+```
+
+结束方式与面板上的「断开」一致：对端会知道是被本机用户结束的，因此允许重连。
+
+**审计**：`session.terminate`。
+
+#### 6.7.6 清理已结束的会话
+
+```
+POST /dismiss
+```
+
+会话已结束（`/sessions` 中 `disconnected: true`）但仍在列表里时，用它把条目移除 —— 与面板上的「关闭」一致。
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | int | 会话标识 |
+
+**成功响应（200）**
+
+```json
+{"ok":true,"result":{"peer_id":"123456789"}}
+```
+
+会话仍在进行时返回 409（此时应使用 `/terminate`）。
+
+### 6.8 操作级审计（桌面端内部机制，非本 API 端点）
 
 自 v1.7 起，桌面端对本 API 引发的关键动作以及会话内高风险操作统一做操作级审计（企业版设计 §8）：
 
@@ -252,6 +458,7 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
 - 本地兜底：始终追加写入日志目录下的 `audit.log`（每行一条 JSON），不阻塞主流程，断网上报也不丢记录。
 - 转发上报：若 `[options] audit-server-url` 已配置（如 GateDeskWeb 的 `http://<ip>:3000/api/audit`），事件以异步 POST 转发到该端点；失败静默（本地已兜底）。
 - 由本 API 引发的动作：`/password` 成功/失败 → `auth.grant`；`/connect` → `connect.start`（ok/err）；`/disconnect` 实际关闭会话 → `connect.close`；`/voice` → `voice.on` / `voice.off`。
+- 受控端会话动作（v1.8）：放行接入 → `login.approve`；拒绝接入 → `login.deny`；允许控制 → `control.approve`；拒绝控制 → `control.deny`；控制请求超时 → `control.timeout`；结束会话 → `session.terminate`；改权限 → `permission.change`。这些事件**在真正执行的连接层记录**，所以无论动作来自会话面板还是本 API，日志一致且都带着会话号与对端 ID —— 代价是日志里看不出动作是谁发起的（平台侧需自行留日志）。
 - 会话内操作（控制端会话窗口/受控端执行点）也产生事件：`record.start/stop`、`remote.restart`、`privacy.on/off`、`block_input.on/off`、`voice.on/off`。
 
 > 说明：审计事件由桌面端直接上报，不经本地 HTTP API 转发；本小节仅为集成方说明事件来源与排查 `audit.log` 提供索引。
@@ -265,10 +472,13 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
 | 400 | 参数缺失或非法（如 `id` 为空/超长、`/password` 密码为空/超长、`/voice` 的 `enabled` 非 true/false） |
 | 401 | 未携带 token、token 错误、或未配置 `api-token`（响应体区分原因） |
 | 403 | Host 头非 localhost/127.0.0.1，或 `Origin` 非受信来源（v1.7） |
-| 404 | 未知路径 |
+| 404 | 未知路径；或会话接口中 `id` 对应的会话不存在（v1.8） |
 | 405 | 方法不允许 |
+| 409 | 会话当前状态与该动作不符：应答一个并不存在的控制请求、放行一个已经放行的对端、结束一个已经结束的会话、在权限被运维锁定时改权限（v1.8） |
 | 413 | 请求体 `Content-Length` 超过 1024 字节（v1.7） |
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
+| 503 | 本机当前没有连接管理器在监听（即无会话、无会话面板窗口），会话类接口无法执行（v1.8） |
+| 504 | 连接管理器在运行，但没有按期回复（v1.8） |
 
 **401 响应体区分**
 
@@ -288,6 +498,24 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
    └─ 远程结束 → POST /disconnect（仅断开该远程会话，不关主界面/不关机）
 ```
 
+### 8.1 被控端无人值守批准（v1.8）
+
+设备不开 `--ui` 时，会话面板是唯一能应答对端请求的窗口。若希望由平台统一决策（而非现场有人点），可由平台轮询本机接口代为应答：
+
+```
+管理端/业务系统（每个被控设备）
+   └─ 轮询 GET /sessions
+         ├─ 有会话 authorized=false         → 请求接入，按平台策略 POST /approve
+         ├─ 有会话 pending_control=true     → 请求键鼠，按平台策略 POST /control
+         └─ 有会话 disconnected=true        → 已结束，POST /dismiss 清理
+   └─ 授权后需要收紧/放开能力 → POST /permission
+   └─ 需要主动收尾 → POST /terminate
+```
+
+- **轮询间隔必须显著小于 60 秒**：控制请求超时即被拒绝，间隔太大会错过窗口、控制端只能重新发起。
+- 平台代为批准会在本机 `audit.log` 留下 `login.approve` / `control.approve` 等记录，但**不会注明是哪个平台** —— 平台侧需自行留日志，两边靠设备 ID + 时间对账。
+- 一次会话可能同时存在多条请求（远程桌面 + 文件传输），`/sessions` 返回的 `id` 才是寻址依据。
+
 ## 9. 冒烟测试命令
 
 ```powershell
@@ -305,12 +533,29 @@ netstat -ano | findstr 21120
 curl -s -o NUL -w "%{http_code}" -H "Host: evil.example" "http://127.0.0.1:21120/id?token=<token>"
 # 伪造跨域 Origin → 403（v1.7）
 curl -s -o NUL -w "%{http_code}" -H "Origin: http://evil.example" "http://127.0.0.1:21120/id?token=<token>"
+
+# --- 受控端会话接口（v1.8）---
+# 列出会话（无会话且面板窗口已退出 → 503；面板窗口还在 → 200 且 sessions 为 []）
+curl "http://127.0.0.1:21120/sessions?token=<token>"
+# 批准接入（把 <id> 换成 /sessions 返回的 id）→ 200，面板上对应卡片消失
+curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
+# 允许控制 → 200，会话面板上的「允许/拒绝」提示同步消失
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
+# 开关权限 → 200，面板上对应开关同步变化
+curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"enabled\":true}"
+# 结束会话 → 200，对端断开且允许重连
+curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d "{\"id\":<id>}"
+# 清理已结束的会话 → 200
+curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
+# 状态不符 → 409（例：对同一个 id 重复 /approve）
+# 无会话管理器 → 503（例：本机当时没有任何会话）
 ```
 
 ## 10. 变更记录
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-17 | 1.8 | 新增受控端会话接口（§6.7）：`GET /sessions` 列出会话与待办请求、`POST /approve` 批准/拒绝接入、`POST /control` 应答控制请求、`POST /permission` 开关权限、`POST /terminate` 结束会话、`POST /dismiss` 清理已结束会话；实现走进程内 `_cm` 通道，与受控端会话面板同一批动作（接口与面板状态互通）；新增审计事件 `login.approve` / `login.deny` / `session.terminate` / `permission.change`（§6.8）；错误码新增 409（会话状态不符）、503（无会话管理器）与 504（管理器未按期回复）；新增 §8.1 被控端无人值守批准流程 |
 | 2026-09-10 | 1.7 | 本地接口加固：Host 校验（仅 localhost/127.0.0.1，防 DNS Rebinding）、CORS 收紧（`Access-Control-Allow-Origin` 仅对受信来源回显，支持 `[options] api-cors-origin`）、请求体 1024B 上限（413）；`GET /status` 新增 `assistable`（本机已授权「可被协助」）；操作级审计：`/password→auth.grant`、`/connect→connect.start`、`/disconnect→connect.close`、`/voice→voice.on/off`，事件写本地 `audit.log`（JSON Lines）并可选转发 `[options] audit-server-url`（§6.7）；Unix 下启动时对配置文件 chmod 0600 |
 | 2026-09-07 | 1.6 | 收敛附录 A 的实现细节，改为面向二次开发的配置约定说明，保留路径、键定义、使用方式与维护纪律，避免过度暴露内部实现 |
 | 2026-09-07 | 1.5 | 细化「附录 A：GateDesk2.toml 配置文件」：补充路径、数据源、缓存、优先级、写入机制、TOML 示例与典型键值说明，便于运维直接维护 |

@@ -1,4 +1,6 @@
+use crate::ipc::{self, LocalApiAction, LocalApiCall, LocalApiReply};
 use hbb_common::log;
+use hbb_common::tokio;
 use std::cell::RefCell;
 use std::sync::{Mutex, OnceLock};
 use tiny_http::{Header, Method, Request, Response, Server};
@@ -499,11 +501,186 @@ fn handle_voice(mut request: Request) {
     }
 }
 
+// --- sessions ---------------------------------------------------------------
+//
+// The endpoints below drive this machine as the CONTROLLED side: letting a peer
+// in, answering its request to take the keyboard, switching what it may do. That
+// state lives in the connection manager's process - this one may be the main
+// client or `--server`, depending on which started first - so they are clients of
+// it over the same IPC channel the session panel uses. See
+// `crate::ui_cm_interface::local_api_call`.
+
+/// How long the connection manager is given to answer, in milliseconds. It is
+/// another process and may be busy drawing, but every action here is a couple of
+/// sends; a caller left waiting on a window that is not coming is worse than an
+/// error telling it to look at the window.
+const CM_REPLY_TIMEOUT_MS: u64 = 2000;
+
+/// Ask the connection manager to act on a session, and wait for its answer.
+///
+/// The answer is waited for rather than assumed, because a caller with no window
+/// has no other way to tell "done" from "no such session".
+///
+/// The error carries the status to answer with, because the failures are not the
+/// same failure: nothing listening means there is no session manager right now,
+/// while one that is running and did not answer is a fault worth looking into.
+#[tokio::main(flavor = "current_thread")]
+async fn cm_call(call: LocalApiCall) -> Result<LocalApiReply, (u16, String)> {
+    let mut conn = ipc::connect(1000, "_cm")
+        .await
+        .map_err(|e| (503, format!("no session manager is listening: {}", e)))?;
+    conn.send(&ipc::Data::LocalApi(call))
+        .await
+        .map_err(|e| (500, format!("cannot reach the session manager: {}", e)))?;
+    // One wait, one answer. The session manager replies on this connection and says
+    // nothing else on it, so anything else - or nothing - is a fault; looping until
+    // something looks like a reply would leave this request without an upper bound,
+    // and the request behind it waiting for that.
+    match conn.next_timeout2(CM_REPLY_TIMEOUT_MS).await {
+        Some(Ok(Some(ipc::Data::LocalApiReply(reply)))) => Ok(reply),
+        Some(Ok(Some(_))) => Err((500, "the session manager answered with something else".to_owned())),
+        Some(Ok(None)) => Err((500, "the session manager closed the connection".to_owned())),
+        Some(Err(e)) => Err((500, format!("session manager error: {}", e))),
+        None => Err((504, "the session manager did not answer".to_owned())),
+    }
+}
+
+/// Turn the connection manager's answer into a response.
+///
+/// The status codes are the ones a caller can act on: 404 means the session it
+/// named is gone, 409 that the action does not apply to the state that session is
+/// in - answering a control request nobody made, say - and 503 that there is no
+/// session manager to ask at all.
+fn respond_reply(request: Request, reply: LocalApiReply, ok_key: &str) {
+    match reply {
+        LocalApiReply::Ok { data } => {
+            let body = if data.is_empty() {
+                "{\"ok\":true}".to_owned()
+            } else {
+                format!("{{\"ok\":true,\"{}\":{}}}", ok_key, data)
+            };
+            respond(request, 200, body);
+        }
+        LocalApiReply::BadRequest { reason } => respond(request, 400, error_body(&reason)),
+        LocalApiReply::NotFound => respond(request, 404, error_body("no such session")),
+        LocalApiReply::Conflict { reason } => respond(request, 409, error_body(&reason)),
+        LocalApiReply::Failed { reason } => respond(request, 500, error_body(&reason)),
+    }
+}
+
+/// Hand one session action to the connection manager.
+fn dispatch(request: Request, id: i32, action: LocalApiAction) {
+    match cm_call(LocalApiCall { id, action }) {
+        Ok(reply) => respond_reply(request, reply, "result"),
+        Err((status, reason)) => respond(request, status, error_body(&reason)),
+    }
+}
+
+fn error_body(reason: &str) -> String {
+    format!(
+        "{{\"ok\":false,\"error\":{}}}",
+        serde_json::Value::String(reason.to_owned())
+    )
+}
+
+/// `{"id": 3}` out of a request body.
+fn id_field(body: &str) -> Option<i32> {
+    json_field(body, "id")?.parse().ok()
+}
+
+/// `{"accept": true}` / `{"enabled": false}` out of a request body.
+fn bool_field(body: &str, key: &str) -> Option<bool> {
+    match json_field(body, key)?.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// `GET /sessions` - every peer that is here or trying to get in, with the
+/// permissions it has, whether it is waiting to be let in, and whether a control
+/// request is outstanding. It is the list the session panel draws, and the one a
+/// caller reads before deciding anything.
+fn handle_sessions(request: Request) {
+    let call = LocalApiCall {
+        id: 0,
+        action: LocalApiAction::Sessions,
+    };
+    match cm_call(call) {
+        Ok(reply) => respond_reply(request, reply, "sessions"),
+        Err((status, reason)) => respond(request, status, error_body(&reason)),
+    }
+}
+
+/// `POST /approve` `{"id":3,"accept":true}` - let a peer in, or refuse it: the
+/// session panel's Accept / Dismiss. Nothing else is listening for a peer's login
+/// when the app runs headless, so this is one of the two ways a session can start.
+fn handle_approve(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let (Some(id), Some(accept)) = (id_field(&body), bool_field(&body, "accept")) else {
+        return respond(request, 400, error_body("id and accept are required"));
+    };
+    dispatch(request, id, LocalApiAction::Approve { accept });
+}
+
+/// `POST /control` `{"id":3,"accept":true}` - answer a peer's request to drive
+/// this machine's mouse and keyboard: the session panel's Allow / Deny.
+///
+/// Every session starts view-only, so this is what hands over the keyboard, and
+/// it lasts for that session only. A request nobody answers is denied once it
+/// times out, which is why silence is never read as consent.
+fn handle_control(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let (Some(id), Some(accept)) = (id_field(&body), bool_field(&body, "accept")) else {
+        return respond(request, 400, error_body("id and accept are required"));
+    };
+    dispatch(request, id, LocalApiAction::Control { accept });
+}
+
+/// `POST /permission` `{"id":3,"name":"clipboard","enabled":true}` - switch
+/// one of the things a peer may do: the session panel's switches. The names are
+/// the ones the panel draws a switch for.
+fn handle_permission(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let (Some(id), Some(name), Some(enabled)) = (
+        id_field(&body),
+        json_field(&body, "name"),
+        bool_field(&body, "enabled"),
+    ) else {
+        return respond(
+            request,
+            400,
+            error_body("id, name and enabled are required"),
+        );
+    };
+    dispatch(request, id, LocalApiAction::Permission { name, enabled });
+}
+
+/// `POST /terminate` `{"id":3}` - end a session: the session panel's Disconnect.
+/// The peer is told a person ended it, so it is allowed to reconnect.
+fn handle_terminate(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let Some(id) = id_field(&body) else {
+        return respond(request, 400, error_body("id is required"));
+    };
+    dispatch(request, id, LocalApiAction::Terminate);
+}
+
+/// `POST /dismiss` `{"id":3}` - take a session that has already ended off the
+/// list: the session panel's Close. Nothing else would ever remove it.
+fn handle_dismiss(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let Some(id) = id_field(&body) else {
+        return respond(request, 400, error_body("id is required"));
+    };
+    dispatch(request, id, LocalApiAction::Dismiss);
+}
+
 /// Live session status. `in_session` reflects whether a connect-session spawned
 /// by this API is still running (stale pids are pruned), and `peer_id` is that
 /// session's target id. `online` reflects whether GateDesk has logged in to the
-/// rendezvous server. True cross-process per-session state is out of scope for
-/// the PoC.
+/// rendezvous server. The sessions this machine is being controlled in are at
+/// `GET /sessions` instead - this one is about the connections this API opened.
 fn handle_status(request: Request) {
     let online = crate::ui_interface::get_connect_status().status_num != 0;
     let assistable = crate::ui_interface::is_local_permanent_password_set();
@@ -616,6 +793,24 @@ fn handle(request: Request) {
         }
         (&Method::Post, "/password") => {
             handle_password(request);
+        }
+        (&Method::Get, "/sessions") => {
+            handle_sessions(request);
+        }
+        (&Method::Post, "/approve") => {
+            handle_approve(request);
+        }
+        (&Method::Post, "/control") => {
+            handle_control(request);
+        }
+        (&Method::Post, "/permission") => {
+            handle_permission(request);
+        }
+        (&Method::Post, "/terminate") => {
+            handle_terminate(request);
+        }
+        (&Method::Post, "/dismiss") => {
+            handle_dismiss(request);
         }
         (&Method::Post, "/voice") => {
             handle_voice(request);

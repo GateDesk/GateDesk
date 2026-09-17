@@ -1,7 +1,7 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::ipc::Connection;
 #[cfg(not(any(target_os = "ios")))]
-use crate::ipc::{self, Data};
+use crate::ipc::{self, Data, LocalApiAction, LocalApiCall, LocalApiReply};
 #[cfg(target_os = "windows")]
 use crate::{clipboard::ClipboardSide, ipc::ClipboardNonFile};
 #[cfg(target_os = "windows")]
@@ -348,6 +348,163 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         self.ui_handler.update_control_request(id, pending);
     }
 
+    /// Carry out one call made over the local HTTP API, or say why it cannot be.
+    ///
+    /// Deliberately routed through the same calls the panel makes, so that a
+    /// third party driving this machine and a person clicking the panel cannot
+    /// end up in different states. The panel gets the checks below for free by
+    /// only drawing the buttons that apply; a caller that has no window needs
+    /// them made explicitly, or "allow" on a request nobody made would look like
+    /// it worked.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn local_api_call(&self, call: LocalApiCall) -> LocalApiReply {
+        // Everything but `Sessions` is about one particular session, and for a caller
+        // with no window the difference between a session that exists and one that
+        // does not is the answer, rather than a button that was not drawn. The peer id
+        // is read here as well, to hand back for the caller's own log: the panel shows
+        // it, a program calling this has nothing to show.
+        let (exists, authorized, disconnected, pending_control, peer_json) = {
+            let clients = CLIENTS.read().unwrap();
+            match clients.get(&call.id) {
+                Some(c) => (
+                    true,
+                    c.authorized,
+                    c.disconnected,
+                    c.pending_control,
+                    serde_json::json!({"peer_id": c.peer_id}).to_string(),
+                ),
+                None => (false, false, false, false, String::new()),
+            }
+        };
+        match call.action {
+            // The one call that is not about a session, and so the one that answers
+            // without any session existing: it is what a caller reads first.
+            LocalApiAction::Sessions => {
+                let list: Vec<Client> = CLIENTS.read().unwrap().values().cloned().collect();
+                match serde_json::to_string(&list) {
+                    Ok(data) => LocalApiReply::Ok { data },
+                    Err(e) => LocalApiReply::Failed {
+                        reason: format!("cannot serialize sessions: {}", e),
+                    },
+                }
+            }
+            _ if !exists => LocalApiReply::NotFound,
+            LocalApiAction::Approve { accept } => {
+                if authorized {
+                    return LocalApiReply::Conflict {
+                        reason: "the peer is already through the door".to_owned(),
+                    };
+                }
+                // The server answers an authorization with a `Login` carrying
+                // `authorized`, and that is what redraws the card; a refusal is the
+                // same `Close` the panel's Dismiss sends, which ends the connection.
+                if accept {
+                    authorize(call.id);
+                } else {
+                    close(call.id);
+                }
+                LocalApiReply::Ok {
+                    data: peer_json.clone(),
+                }
+            }
+            LocalApiAction::Control { accept } => {
+                if !pending_control {
+                    return LocalApiReply::Conflict {
+                        reason: "no control request is pending".to_owned(),
+                    };
+                }
+                // The server settles the request and sends `ControlRequest` back with
+                // `pending: false`, which is what clears the panel's prompt.
+                respond_control_request(call.id, accept);
+                LocalApiReply::Ok {
+                    data: peer_json.clone(),
+                }
+            }
+            LocalApiAction::Permission { name, enabled } => {
+                if let Err(reason) = permission_switch_available(&name) {
+                    return LocalApiReply::BadRequest { reason };
+                }
+                // Same policy the panel's own switches obey - see `switch_permission`.
+                // Checked here as well so that the caller is told instead of the
+                // request being logged and dropped.
+                if name != "keyboard"
+                    && !option2bool(
+                        OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW,
+                        &crate::get_builtin_option(OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW),
+                    )
+                {
+                    return LocalApiReply::Conflict {
+                        reason: "permissions cannot be changed in the accept window".to_owned(),
+                    };
+                }
+                switch_permission(call.id, name.clone(), enabled);
+                self.set_permission_locally(call.id, &name, enabled);
+                LocalApiReply::Ok {
+                    data: peer_json.clone(),
+                }
+            }
+            LocalApiAction::Terminate => {
+                // The peer is told a person ended the session, not that the window
+                // went away: `close` is what the panel's Disconnect sends.
+                close(call.id);
+                LocalApiReply::Ok {
+                    data: peer_json.clone(),
+                }
+            }
+            LocalApiAction::Dismiss => {
+                if !disconnected {
+                    return LocalApiReply::Conflict {
+                        reason: "the session is still running".to_owned(),
+                    };
+                }
+                // The same call the server's own end-of-session path makes, which is
+                // also what cleans up after a file transfer - the panel's own Close
+                // gets away with less because it redraws from the page, and that is
+                // not a shortcut worth copying here.
+                self.remove_connection(call.id, true);
+                LocalApiReply::Ok {
+                    data: peer_json,
+                }
+            }
+        }
+    }
+
+    /// Record a permission the local API just switched, then have the window redraw
+    /// from it.
+    ///
+    /// The panel updates itself optimistically when a person clicks a switch; a call
+    /// arriving over HTTP has no such click, so without this the switch would sit at
+    /// its old position until the next thing the server happens to send.
+    ///
+    /// What the window makes of it is the window's business: the Sciter page redraws
+    /// every field it is handed, while Flutter's `add_connection` only takes
+    /// `privacy_mode` for a session it already has, so there the other switches wait
+    /// for the next full refresh. The state recorded here is what `GET /sessions`
+    /// reports either way.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn set_permission_locally(&self, id: i32, name: &str, enabled: bool) {
+        let client = {
+            let mut clients = CLIENTS.write().unwrap();
+            clients.get_mut(&id).map(|c| {
+                match name {
+                    "keyboard" => c.keyboard = enabled,
+                    "clipboard" => c.clipboard = enabled,
+                    "audio" => c.audio = enabled,
+                    "file" => c.file = enabled,
+                    "restart" => c.restart = enabled,
+                    "recording" => c.recording = enabled,
+                    "block_input" => c.block_input = enabled,
+                    "privacy_mode" => c.privacy_mode = enabled,
+                    _ => {}
+                }
+                c.clone()
+            })
+        };
+        if let Some(client) = client {
+            self.ui_handler.add_connection(&client);
+        }
+    }
+
     #[cfg(not(target_os = "ios"))]
     fn voice_call_started(&self, id: i32) {
         if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
@@ -529,6 +686,29 @@ pub fn switch_back(id: i32) {
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
         allow_err!(client.tx.send(Data::SwitchSidesBack));
     };
+}
+
+/// The permissions a caller may name, i.e. the ones the panel draws a switch for.
+///
+/// Kept as a list rather than passed through: `switch_permission` hands whatever name
+/// it is given to the server, and a server is the wrong place to find out that a third
+/// party spelled one wrong. The two platform-bound switches are refused where the
+/// panel would not have drawn them either.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn permission_switch_available(name: &str) -> Result<(), String> {
+    match name {
+        "keyboard" | "clipboard" | "audio" | "file" | "restart" | "recording" => Ok(()),
+        "block_input" if cfg!(target_os = "windows") => Ok(()),
+        "block_input" => Err("blocking user input is only available on Windows".to_owned()),
+        "privacy_mode" => {
+            if crate::privacy_mode::get_supported_privacy_mode_impl().is_empty() {
+                Err("privacy mode is not available on this platform".to_owned())
+            } else {
+                Ok(())
+            }
+        }
+        other => Err(format!("unknown permission \"{}\"", other)),
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -763,6 +943,13 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                             allow_err!(self.stream.send(&Data::ClipboardNonFile(Some((format!("{}", e), vec![])))).await);
                                         }
                                     }
+                                }
+                                Data::LocalApi(call) => {
+                                    // Answered on the same connection: the caller is the
+                                    // local HTTP API, which has no other channel on which
+                                    // to hear that its request was carried out.
+                                    let reply = self.cm.local_api_call(call);
+                                    allow_err!(self.stream.send(&Data::LocalApiReply(reply)).await);
                                 }
                                 _ => {
 
