@@ -53,6 +53,7 @@ pub fn is_xfce() -> bool {
     }
 }
 
+/// Runs from `hbb_common`'s crash handler, immediately before it exits the process.
 pub fn breakdown_callback() {
     #[cfg(target_os = "linux")]
     crate::input_service::clear_remapped_keycode();

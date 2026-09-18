@@ -867,7 +867,7 @@ pub fn run_exe_direct(
     if !show {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    match cmd.spawn() {
+    match crate::common::detach_stdio(&mut cmd).spawn() {
         Ok(child) => Ok(Some(child)),
         Err(e) => bail!("Failed to start process: {}", e),
     }
@@ -4022,7 +4022,9 @@ fn run_after_run_cmds(silent: bool) {
             .spawn());
     }
     if Config::get_option("stop-service") != "Y" {
-        allow_err!(std::process::Command::new(&exe).arg("--tray").spawn());
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--tray");
+        allow_err!(crate::common::detach_stdio(&mut cmd).spawn());
     }
     std::thread::sleep(std::time::Duration::from_millis(300));
 }

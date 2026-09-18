@@ -841,13 +841,32 @@ pub fn refresh_rendezvous_server() {
     });
 }
 
+/// Point `cmd`'s child at the null device for its standard streams instead of letting it
+/// inherit this process's.
+///
+/// Our own entry points are GUI processes with nothing to say to a console, and
+/// inheriting one is not free. `std` passes `Command::spawn` the three handles
+/// `GetStdHandle` reports, and a GUI process started from a console (`cmd`, PowerShell)
+/// holds the console's handles while not being attached to it - `GetConsoleProcessList`
+/// says so, with `ERROR_INVALID_HANDLE`. Windows 7 will not take those for a child and
+/// fails the spawn with the same `ERROR_INVALID_HANDLE` (6). Started from Explorer the
+/// three handles are null, `std` leaves `STARTF_USESTDHANDLES` unset, and the spawn
+/// works, which is why the tray a `--server` process starts showed up on a double click
+/// and not on the command line.
+pub fn detach_stdio(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+}
+
 pub fn run_me<T: AsRef<std::ffi::OsStr>>(args: Vec<T>) -> std::io::Result<std::process::Child> {
     #[cfg(target_os = "linux")]
     if let Ok(appdir) = std::env::var("APPDIR") {
         let appimage_cmd = std::path::Path::new(&appdir).join("AppRun");
         if appimage_cmd.exists() {
             log::info!("path: {:?}", appimage_cmd);
-            return std::process::Command::new(appimage_cmd).args(&args).spawn();
+            let mut cmd = std::process::Command::new(appimage_cmd);
+            return detach_stdio(&mut cmd).args(&args).spawn();
         }
     }
     let cmd = std::env::current_exe()?;
@@ -865,7 +884,7 @@ pub fn run_me<T: AsRef<std::ffi::OsStr>>(args: Vec<T>) -> std::io::Result<std::p
             force_foreground = true;
         }
     }
-    let result = cmd.args(&args).spawn();
+    let result = detach_stdio(&mut cmd).args(&args).spawn();
     match result.as_ref() {
         Ok(_child) =>
         {
