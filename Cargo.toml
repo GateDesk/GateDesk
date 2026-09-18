@@ -217,6 +217,14 @@ exclude = ["vdi/host"]
 [patch.crates-io]
 libxdo-sys = { path = "libs/libxdo-sys-stub" }
 
+# muda looks up the undocumented uxtheme dark mode entry points by ordinal and calls
+# whatever it finds, without asking whether that ordinal means ShouldAppsUseDarkMode on
+# this Windows. Windows 7 answers ordinal 132 with another function, and calling it as the
+# dark mode query (no arguments, a bool back) took the tray process down as soon as the
+# menu was opened. libs/muda is the same crate (0.17.1) with that lookup gated on the
+# build number - see `dark_mode_api_available` in its dark_menu_bar.rs.
+muda = { path = "libs/muda" }
+
 # libsodium-sys 0.2.7 selects its prebuilt library with #[cfg(target_pointer_width)], which the
 # build script evaluates for the *host*: cross compiling from x64 to x86 handed the linker the
 # x64 library and the link failed with LNK4272. libs/libsodium-sys is the same crate (0.2.7)
