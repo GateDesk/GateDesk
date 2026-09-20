@@ -421,6 +421,15 @@ pub enum Data {
     ControlResponse {
         accepted: bool,
     },
+    /// A local API client asking this session to ask its peer for control.
+    ///
+    /// The peer connection lives in the session process while the HTTP API on
+    /// 127.0.0.1:21120 runs in the `--server` process, so the two talk over IPC. The
+    /// listener is named after the peer (`_control_<peer id>`) because a machine can
+    /// run several sessions at once and each one owns a different peer.
+    RequestControl {
+        peer_id: String,
+    },
     /// A local API client asking the connection manager to act on a session.
     ///
     /// Sent to the connection manager and answered on the same connection, because
@@ -1488,6 +1497,45 @@ fn user_main_ipc_server_uid() -> ResultType<u32> {
     select_server_uid_for_user_main_ipc(&server_uids, active_uid(), prefer_root)
 }
 
+/// Prefix of a session's control listener; the peer id is appended so one machine can
+/// run one listener per session instead of a single ambiguous name.
+pub const POSTFIX_CONTROL: &str = "_control_";
+
+/// Serve local-API control requests addressed to `peer_id`.
+///
+/// The HTTP API on this machine is a different process from the session it spawned, so
+/// a request travels over IPC: this listener owns `_control_<peer id>` and `on_request`
+/// - the session's own "Request control" toggle - does the work. The reply is only an
+/// ack, so a caller can tell "the session took it" from "no such session".
+///
+/// Blocks; callers run it on its own thread. Returns instead of panicking when the name
+/// is already taken, so a reconnecting session cannot wedge the process it runs in.
+#[tokio::main(flavor = "current_thread")]
+pub async fn listen_control_requests(peer_id: String, on_request: Box<dyn Fn() + Send>) {
+    let postfix = format!("{}{}", POSTFIX_CONTROL, peer_id);
+    let mut incoming = match new_listener(&postfix).await {
+        Ok(incoming) => incoming,
+        Err(e) => {
+            hbb_common::log::warn!("cannot listen for control requests on {}: {}", postfix, e);
+            return;
+        }
+    };
+    while let Some(result) = incoming.next().await {
+        let Ok(stream) = result else { continue };
+        let mut conn = Connection::new(stream);
+        if let Some(Ok(Some(Data::RequestControl { peer_id: asked }))) =
+            conn.next_timeout2(1000).await
+        {
+            // The name already identifies the session, but check anyway: a stale socket
+            // left by a previous session must not be made to act for a peer it never had.
+            if asked == peer_id {
+                on_request();
+                let _ = conn.send(&Data::Test).await;
+            }
+        }
+    }
+}
+
 pub async fn connect(ms_timeout: u64, postfix: &str) -> ResultType<ConnectionTmpl<ConnClient>> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
@@ -2380,3 +2428,4 @@ mod test {
         assert!(select_server_uid_for_user_main_ipc(&[501, 502], None, false).is_err());
     }
 }
+

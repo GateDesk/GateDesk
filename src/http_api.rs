@@ -597,6 +597,56 @@ fn bool_field(body: &str, key: &str) -> Option<bool> {
     }
 }
 
+/// `POST /request-control` `{"id":"<peer id>"}` - ask a peer for control.
+///
+/// This is the controller-side counterpart of `/control`: the operator asks, the peer
+/// answers its own prompt. The ask is the `disable_keyboard` option being cleared,
+/// which is what the remote window's "Request control" menu item does, and the session
+/// stays view-only until the peer agrees.
+///
+/// The connection lives in the session process this API spawned (`POST /connect`), so
+/// the request is forwarded over IPC to `_control_<peer id>`: one listener per session,
+/// so several open sessions do not have to share a single name.
+fn handle_request_control(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let Some(id) = json_field(&body, "id") else {
+        return respond(request, 400, error_body("id is required"));
+    };
+    if id.is_empty() || id.len() > 128 {
+        return respond(request, 400, error_body("invalid id"));
+    }
+    match ask_session_for_control(&id) {
+        Ok(()) => respond(request, 200, "{\"ok\":true}".to_owned()),
+        Err((status, reason)) => respond(request, status, error_body(&reason)),
+    }
+}
+
+/// Hand the request to the session that owns `peer_id`.
+///
+/// A 503 means no session process is listening for that peer - nothing was opened, or
+/// the session has already gone - which the caller may have to tell apart from a peer
+/// that simply has not answered its prompt yet. That answer never reaches here: the
+/// ack only says the session ran its toggle.
+#[tokio::main(flavor = "current_thread")]
+async fn ask_session_for_control(peer_id: &str) -> Result<(), (u16, String)> {
+    const ACK_TIMEOUT_MS: u64 = 2000;
+    let postfix = format!("{}{}", ipc::POSTFIX_CONTROL, peer_id);
+    let mut conn = ipc::connect(1000, &postfix)
+        .await
+        .map_err(|e| (503, format!("no session for {} is listening: {}", peer_id, e)))?;
+    conn.send(&ipc::Data::RequestControl {
+        peer_id: peer_id.to_owned(),
+    })
+    .await
+    .map_err(|e| (500, format!("cannot reach the session: {}", e)))?;
+    match conn.next_timeout2(ACK_TIMEOUT_MS).await {
+        Some(Ok(Some(ipc::Data::Test))) => Ok(()),
+        Some(Ok(Some(_))) => Err((500, "the session answered with something else".to_owned())),
+        Some(_) => Err((500, "the session closed the connection".to_owned())),
+        None => Err((504, "the session did not answer".to_owned())),
+    }
+}
+
 /// `GET /sessions` - every peer that is here or trying to get in, with the
 /// permissions it has, whether it is waiting to be let in, and whether a control
 /// request is outstanding. It is the list the session panel draws, and the one a
@@ -791,6 +841,9 @@ fn handle(request: Request) {
         (&Method::Post, "/disconnect") => {
             handle_disconnect(request);
         }
+        (&Method::Post, "/request-control") => {
+            handle_request_control(request);
+        }
         (&Method::Post, "/password") => {
             handle_password(request);
         }
@@ -823,6 +876,7 @@ fn handle(request: Request) {
         }
     }
 }
+
 
 
 

@@ -615,11 +615,26 @@ impl SciterSession {
             ConnType::DEFAULT_CONN
         };
 
+        // The listener below is named after the peer, so take the id before `initialize`
+        // moves it.
+        let listener_peer = id.clone();
         session
             .lc
             .write()
             .unwrap()
             .initialize(id, conn_type, None, force_relay, None, None, None);
+
+        // The local API on this machine (`POST /request-control`) runs in the `--server`
+        // process, not this one, so it reaches this session over IPC. The listener is
+        // named after the peer: several sessions can be open at once, one listener each,
+        // and the toggle is the same one the window's "Request control" menu item runs.
+        let listener_session = session.clone();
+        std::thread::spawn(move || {
+            crate::ipc::listen_control_requests(
+                listener_peer,
+                Box::new(move || listener_session.toggle_option("request-control".to_owned())),
+            );
+        });
 
         Self(session)
     }
