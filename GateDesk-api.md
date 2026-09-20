@@ -517,7 +517,6 @@ curl -X POST "http://127.0.0.1:21120/request-control?token=<token>" -d "{\"id\":
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
 | 503 | 本机当前没有连接管理器在监听（即无会话、无会话面板窗口），会话类接口无法执行（v1.8）；或 `/request-control` 找不到该对端的会话进程（v1.9） |
 | 504 | 连接管理器或会话进程在 2 秒内未回应（v1.8 / v1.9） |
-| 504 | 连接管理器在运行，但没有按期回复（v1.8） |
 
 **401 响应体区分**
 
@@ -707,7 +706,6 @@ id-whitelist = ''
 enable-lan-discovery = ''
 allow-insecure-tls-fallback = ''
 ```
-
 
 
 

@@ -1511,7 +1511,10 @@ pub const POSTFIX_CONTROL: &str = "_control_";
 /// Blocks; callers run it on its own thread. Returns instead of panicking when the name
 /// is already taken, so a reconnecting session cannot wedge the process it runs in.
 #[tokio::main(flavor = "current_thread")]
-pub async fn listen_control_requests(peer_id: String, on_request: Box<dyn Fn() + Send>) {
+pub async fn listen_control_requests(
+    peer_id: String,
+    on_request: std::sync::Arc<dyn Fn() + Send + Sync>,
+) {
     let postfix = format!("{}{}", POSTFIX_CONTROL, peer_id);
     let mut incoming = match new_listener(&postfix).await {
         Ok(incoming) => incoming,
@@ -1522,17 +1525,25 @@ pub async fn listen_control_requests(peer_id: String, on_request: Box<dyn Fn() +
     };
     while let Some(result) = incoming.next().await {
         let Ok(stream) = result else { continue };
-        let mut conn = Connection::new(stream);
-        if let Some(Ok(Some(Data::RequestControl { peer_id: asked }))) =
-            conn.next_timeout2(1000).await
-        {
-            // The name already identifies the session, but check anyway: a stale socket
-            // left by a previous session must not be made to act for a peer it never had.
-            if asked == peer_id {
-                on_request();
-                let _ = conn.send(&Data::Test).await;
+        // One task per connection: reading a request waits up to a second for the caller
+        // to say something, and doing that inline would keep this loop from accepting the
+        // next caller for that long.
+        let on_request = on_request.clone();
+        let expected = peer_id.clone();
+        tokio::spawn(async move {
+            let mut conn = Connection::new(stream);
+            if let Some(Ok(Some(Data::RequestControl { peer_id: asked }))) =
+                conn.next_timeout2(1000).await
+            {
+                // The name already identifies the session, but check anyway: a stale
+                // socket left by a previous session must not be made to act for a peer it
+                // never had.
+                if asked == expected {
+                    on_request();
+                    let _ = conn.send(&Data::Test).await;
+                }
             }
-        }
+        });
     }
 }
 
@@ -2428,4 +2439,3 @@ mod test {
         assert!(select_server_uid_for_user_main_ipc(&[501, 502], None, false).is_err());
     }
 }
-

@@ -612,7 +612,15 @@ fn handle_request_control(mut request: Request) {
     let Some(id) = json_field(&body, "id") else {
         return respond(request, 400, error_body("id is required"));
     };
-    if id.is_empty() || id.len() > 128 {
+    // The id is appended to an IPC name, so keep path separators and control
+    // characters out of it: on Unix that name is a path, and on Windows a backslash
+    // starts a new pipe level.
+    if id.is_empty()
+        || id.len() > 128
+        || id
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | ':'))
+    {
         return respond(request, 400, error_body("invalid id"));
     }
     match ask_session_for_control(&id) {
@@ -642,7 +650,8 @@ async fn ask_session_for_control(peer_id: &str) -> Result<(), (u16, String)> {
     match conn.next_timeout2(ACK_TIMEOUT_MS).await {
         Some(Ok(Some(ipc::Data::Test))) => Ok(()),
         Some(Ok(Some(_))) => Err((500, "the session answered with something else".to_owned())),
-        Some(_) => Err((500, "the session closed the connection".to_owned())),
+        Some(Ok(None)) => Err((500, "the session closed the connection".to_owned())),
+        Some(Err(e)) => Err((500, format!("cannot read the session's answer: {}", e))),
         None => Err((504, "the session did not answer".to_owned())),
     }
 }
@@ -876,7 +885,6 @@ fn handle(request: Request) {
         }
     }
 }
-
 
 
 

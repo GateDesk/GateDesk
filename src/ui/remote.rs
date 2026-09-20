@@ -629,12 +629,22 @@ impl SciterSession {
         // named after the peer: several sessions can be open at once, one listener each,
         // and the toggle is the same one the window's "Request control" menu item runs.
         let listener_session = session.clone();
-        std::thread::spawn(move || {
-            crate::ipc::listen_control_requests(
-                listener_peer,
-                Box::new(move || listener_session.toggle_option("request-control".to_owned())),
-            );
-        });
+        // Named so it can be told apart from the other threads this process runs, and
+        // started through Builder because failing to create it must not take the session
+        // down with it: the listener is a convenience, the window is not.
+        if let Err(e) = std::thread::Builder::new()
+            .name(format!("gd-control-{}", listener_peer))
+            .spawn(move || {
+                crate::ipc::listen_control_requests(
+                    listener_peer,
+                    std::sync::Arc::new(move || {
+                        listener_session.toggle_option("request-control".to_owned())
+                    }),
+                );
+            })
+        {
+            hbb_common::log::warn!("cannot start the control-request listener: {}", e);
+        }
 
         Self(session)
     }
