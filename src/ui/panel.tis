@@ -34,7 +34,7 @@ function connection_of(element) {
     while (node) {
         if (node.attributes) {
             var v = node.attributes["data-conn-id"];
-            if (v) return find_connection(parseInt(v));
+            if (v) return find_connection(v.toInteger());
         }
         node = node.parent;
     }
