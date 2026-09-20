@@ -87,7 +87,7 @@ function render_permissions(c) {
         <div .perm-title>{translate('Permissions')}</div>
         {rows.map(function(r) {
             if (!r[3]) return <div style="display:none" />;
-            return <div class={r[2] ? "perm on" : "perm"} .perm-name={r[0]}>
+            return <div class={r[2] ? "perm on" : "perm"} perm-name={r[0]}>
                 <div .perm-name>{translate(r[1])}</div>
                 <div .switch><div .switch-knob /></div>
             </div>;
