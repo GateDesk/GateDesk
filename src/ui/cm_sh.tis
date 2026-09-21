@@ -1,19 +1,69 @@
+// Connection manager in the skin the headless form uses.
+//
+// This is the window a client started without `--ui` answers control requests in. It is a
+// copy of the original connection manager, `cm.tis`, kept apart from it so that the
+// original stays exactly as upstream has it - the eight switches, the chat pane, the tab
+// strip, all of it. Two things differ here: the permission row is cut down to the four
+// A-class channels (keyboard/mouse, clipboard, audio, file), and a peer's request for one
+// of them is answered in a prompt in this window.
+//
+// Both pages implement the same handler interface (see src/ui/cm.rs), so the Rust side
+// needs nothing page-specific.
+
 view.windowFrame = is_osx ? #extended : #solid;
 
 var body;
 var connections = [];
-var show_chat = false;
-var show_elevation = true;
 var is_privacy_mode_supported = handler.get_supported_privacy_mode_impls() != '[]';
 var allow_perm_change_in_accept_window =
     handler.get_builtin_option('enable-perm-change-in-accept-window') != 'N';
-var svg_elevate = <svg t="1667992597853" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1850" width="16" height="16" xmlns:xlink="http://www.w3.org/1999/xlink"><path d="M892.761 160.724v426.504c0 25.588-6.419 51.036-19.177 76.339-12.798 25.336-29.547 49.86-50.254 73.627-20.707 23.79-44.372 46.296-70.97 67.516-26.589 21.244-53.543 40.177-80.921 56.768-27.363 16.623-53.968 30.461-79.801 41.438-25.809 11.008-48.433 18.547-67.871 22.64l-9.203 1.53-8.43-1.53c-19.958-4.093-43.094-11.632-69.432-22.64-26.337-10.969-53.708-24.816-82.080-41.438-28.388-16.591-56.256-35.524-83.618-56.768-27.378-21.219-51.776-43.725-73.265-67.516-21.488-23.759-38.868-48.291-52.155-73.627-13.319-25.305-19.974-50.759-19.974-76.339v-426.504l31.455-4.629 352.892-65.97 359.784 65.97 23.017 4.629zM510.028 151.884l-4.211-0.844-302.89 51.476v269.101h307.102v-319.734zM815.434 471.634h-305.406v383.031c19.682-4.51 41.052-11.411 64.141-20.692 23.033-9.249 45.815-20.234 68.304-32.867 22.513-12.672 44.159-26.739 64.969-42.203 20.818-15.472 39.23-32.047 55.277-49.797 16.024-17.703 28.822-36.131 38.386-55.222 9.549-19.131 14.328-38.553 14.328-58.235v-124.015z" p-id="1851" fill="#ffffff"></path></svg>;
 
 var hide_cm = undefined;
 function setWindowState(state) {
     if (hide_cm == undefined) hide_cm = handler.hide_cm();
     if (hide_cm) return;
     view.windowState = state;
+}
+
+// The things a peer may ask for by name apart from the keyboard, as the noun that goes
+// inside the sentence the prompt draws - see the same table in cm.tis.
+var permission_labels = {
+    keyboard: "keyboard/mouse",
+    clipboard: "clipboard",
+    audio: "audio",
+    file: "file copy and paste"
+};
+
+// The four A-class channels, one row each with its name and a switch, the way a settings
+// menu shows them. The original window draws the same four as icon squares - see cm.tis,
+// which also keeps the four B-class ones this window has no business offering. What a row
+// is about travels in its `perm-name` attribute, which is what the click handler below
+// reads back; the class is only what the row looks like.
+function render_permissions(c) {
+    var rows = [
+        ["keyboard", "Enable keyboard/mouse", c.keyboard],
+        ["clipboard", "Enable clipboard", c.clipboard],
+        ["audio", "Enable audio", c.audio],
+        ["file", "Enable file copy and paste", c.file]
+    ];
+    return rows.map(function(r) {
+        var cls = r[2] ? "perm on" : "perm";
+        if (!allow_perm_change_in_accept_window) cls += " locked";
+        return <div class={cls} perm-name={r[0]}>
+            <div .perm-name>{translate(r[1])}</div>
+            <div .switch><div .switch-knob /></div>
+        </div>;
+    });
+}
+
+// What the outstanding request is for. Empty means the keyboard and mouse, which is the
+// request that was here before a peer could ask for anything by name.
+function request_title(c) {
+    if (!c.pending_permission) {
+        return translate('A remote user requests to control your mouse and keyboard');
+    }
+    return translate('A remote user requests to enable %1').replace('%1',
+        translate(permission_labels[c.pending_permission] || c.pending_permission));
 }
 
 class Body: Reactor.Component
@@ -33,15 +83,20 @@ class Body: Reactor.Component
         this.connection = c;
         this.cid = c.id;
         var auth = c.authorized;
-        var me = this;
-        var callback = function(msg) {
-            me.sendMsg(msg);
-        };
-        var right_style = show_chat ? "" : "display: none";
-        var permissions_locked = !allow_perm_change_in_accept_window;
         var disconnected = c.disconnected;
-        var show_elevation_btn = handler.can_elevate() && show_elevation && !c.is_file_transfer && !c.is_view_camera && !c.is_terminal && c.port_forward.length == 0;
         var show_accept_btn = handler.get_option('approve-mode') != 'password';
+        var connected = auth && !disconnected;
+        // The permission row stays up once a session is running, the way it always
+        // was: the local user is the only one who can grant or take back a channel,
+        // and the control request prompt below is an additional way in, not the only
+        // one. Hiding the row left an established session with no way to allow
+        // anything (or to revoke it) from this window.
+        //
+        // Only the four A-class channels are drawn below. Remote restart, blocking
+        // user input and privacy mode are not offered at all, and recording is part of
+        // the session rather than a switch - the same set the local API takes and the
+        // same set a peer may ask for. The original window, cm.tis, keeps its eight.
+        var hide_details = c.is_file_transfer || c.is_terminal || c.port_forward || disconnected;
        // below size:* is a workaround for Linux, it already set in css, but not work, shit sciter
         return <div .content style="size:*">
             <div .left-panel>
@@ -61,27 +116,23 @@ class Body: Reactor.Component
                     </div>
                 </div>
                 <div />
-                {c.is_file_transfer || c.is_terminal || c.port_forward || disconnected ? "" : <div>{translate('Permissions')}</div>}
-                {c.is_file_transfer || c.is_terminal || c.port_forward || disconnected ? "" : <div> <div class={permissions_locked ? "permissions locked" : "permissions"} style={permissions_locked ? "opacity:0.6;" : ""}>
-                    <div class={!c.keyboard ? "disabled" : ""} title={translate('Enable keyboard/mouse')}><icon .keyboard /></div>
-                    <div class={!c.clipboard ? "disabled" : ""} title={translate('Enable clipboard')}><icon .clipboard /></div>
-                    <div class={!c.audio ? "disabled" : ""} title={translate('Enable audio')}><icon .audio /></div>
-                    <div class={!c.file ? "disabled" : ""} title={translate('Enable file copy and paste')}><icon .file /></div>
-                    <div class={!c.restart ? "disabled" : ""} title={translate('Enable remote restart')}><icon .restart /></div>
-                </div> <div class={permissions_locked ? "permissions locked" : "permissions"} style={permissions_locked ? "margin-top:8px;opacity:0.6;" : "margin-top:8px;"} >
-                    <div class={!c.recording ? "disabled" : ""} title={translate('Enable recording session')}><icon .recording /></div>
-                    <div class={!c.block_input ? "disabled" : ""} title={translate('Enable blocking user input')} style={is_win ? "" : "display:none;"}><icon .block_input /></div>
-                    <div class={!c.privacy_mode ? "disabled" : ""} title={translate('Enable privacy mode')} style={is_privacy_mode_supported ? "" : "display:none;"}><icon .privacy_mode /></div>
-                </div></div>
-                }
+                {hide_details ? "" : <div .perms>
+                    <div .perm-title>{translate('Permissions')}</div>
+                    {render_permissions(c)}
+                </div>}
                 {c.is_file_transfer ? <div>{translate('Transfer file')}</div> : ""}
                 {c.is_view_camera ? <div>{translate('View camera')}</div> : ""}
                 {c.is_terminal ? <div>{translate('Terminal')}</div> : ""}
                 {c.port_forward ? <div>Port Forwarding: {c.port_forward}</div> : ""}
                 <div style="size:*"/>
+                {connected && c.pending_control ? <div .control-request>
+                    <div>{request_title(c)}</div>
+                    <div .inner_buttons>
+                        <button #allow_control .control .button>{translate('Allow')}</button>
+                        <button #deny_control .control .outline>{translate('Deny')}</button>
+                    </div>
+                </div> : ""}
                 <div .outer_buttons>
-                    {!auth && !disconnected && show_elevation_btn && show_accept_btn ? <button #elevate_accept .control .elevate .button><span><span><span>{svg_elevate}</span><span>{translate('Accept')}</span></span></span></button> : "" }
-                    {auth && !disconnected && show_elevation_btn ? <button #elevate .control .elevate .button><span><span><span>{svg_elevate}</span><span>{translate('Elevate')}</span></span></span></button> : "" }
                     <div .inner_buttons style={auth ? "display:none;":""}>
                         {!auth && show_accept_btn ? <button #accept .control .button>{translate('Accept')}</button> : "" }
                         {!auth ? <button #dismiss .control .outline>{translate('Dismiss')}</button> : "" }
@@ -89,101 +140,23 @@ class Body: Reactor.Component
                     {auth && !disconnected ? <button #disconnect .control .button>{translate('Disconnect')}</button> : "" }
                     {auth && disconnected ? <button #close .control .button>{translate('Close')}</button> : "" }
                 </div>
-                {c.is_file_transfer || c.is_terminal || c.port_forward ? "" : <div .chaticon>{svg_chat}</div>}
-            </div>
-            <div .right-panel style={right_style}>
-                {c.is_file_transfer || c.is_terminal || c.port_forward ? "" : <ChatBox msgs={c.msgs} callback={callback} />}
             </div>
         </div>;
     }
 
-    function sendMsg(text) {
-        if (!text) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.msgs.push({ name: "me", text: text, time: getNowStr()});
-            handler.send_msg(cid, text);
-            body.update();
-        });
-    }
-
-    event click $(icon.keyboard) (e) {
+    // One handler for all four rows: the row says which channel it is in `perm-name`, so
+    // nothing has to be bound per permission. Locked permissions look dead and do nothing;
+    // the server refuses them as well, this is only so the click is not wasted.
+    event click $(div.perm) (_, el) {
         if (!allow_perm_change_in_accept_window) return;
+        var name = el.attributes["perm-name"];
+        if (!name) return;
         var { cid, connection } = this;
+        var on = !connection[name];
         checkClickTime(function() {
-            connection.keyboard = !connection.keyboard;
+            connection[name] = on;
             body.update();
-            handler.switch_permission(cid, "keyboard", connection.keyboard);
-        });
-    }
-
-    event click $(icon.clipboard) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.clipboard = !connection.clipboard;
-            body.update();
-            handler.switch_permission(cid, "clipboard", connection.clipboard);
-        });
-    }
-
-    event click $(icon.audio) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.audio = !connection.audio;
-            body.update();
-            handler.switch_permission(cid, "audio", connection.audio);
-        });
-    }
-
-    event click $(icon.file) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.file = !connection.file;
-            body.update();
-            handler.switch_permission(cid, "file", connection.file);
-        });
-    }
-
-    event click $(icon.restart) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.restart = !connection.restart;
-            body.update();
-            handler.switch_permission(cid, "restart", connection.restart);
-        });
-    }
-
-    event click $(icon.recording) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.recording = !connection.recording;
-            body.update();
-            handler.switch_permission(cid, "recording", connection.recording);
-        });
-    }
-
-    event click $(icon.block_input) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.block_input = !connection.block_input;
-            body.update();
-            handler.switch_permission(cid, "block_input", connection.block_input);
-        });
-    }
-
-    event click $(icon.privacy_mode) {
-        if (!allow_perm_change_in_accept_window) return;
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.privacy_mode = !connection.privacy_mode;
-            body.update();
-            handler.switch_permission(cid, "privacy_mode", connection.privacy_mode);
+            handler.switch_permission(cid, name, on);
         });
     }
 
@@ -193,32 +166,6 @@ class Body: Reactor.Component
             connection.authorized = true;
             body.update();
             handler.authorize(cid);
-            self.timer(30ms, function() {
-                setWindowState(View.WINDOW_MINIMIZED);
-            });
-        });
-    }
-
-    event click $(button#elevate_accept) {
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            connection.authorized = true;
-            show_elevation = false;
-            body.update();
-            handler.elevate_portable(cid);
-            handler.authorize(cid);
-            self.timer(30ms, function() {
-                setWindowState(View.WINDOW_MINIMIZED);
-            });
-        });
-    }
-
-    event click $(button#elevate) {
-        var { cid, connection } = this;
-        checkClickTime(function() {
-            show_elevation = false;
-            body.update();
-            handler.elevate_portable(cid);
             self.timer(30ms, function() {
                 setWindowState(View.WINDOW_MINIMIZED);
             });
@@ -236,6 +183,33 @@ class Body: Reactor.Component
         var cid = this.cid;
         checkClickTime(function() {
             handler.close(cid);
+        });
+    }
+
+    event click $(button#allow_control) {
+        var { cid, connection } = this;
+        checkClickTime(function() {
+            connection.pending_control = false;
+            // A named request is a permission, so its switch moves as well; an unnamed
+            // one is the keyboard, which is what the prompt used to be about. The server
+            // does the same thing on the strength of the answer, this is only so the row
+            // does not sit at its old position until the next refresh.
+            if (connection.pending_permission) {
+                connection[connection.pending_permission] = true;
+            } else {
+                connection.keyboard = true;
+            }
+            body.update();
+            handler.respond_control_request(cid, true);
+        });
+    }
+
+    event click $(button#deny_control) {
+        var { cid, connection } = this;
+        checkClickTime(function() {
+            connection.pending_control = false;
+            body.update();
+            handler.respond_control_request(cid, false);
         });
     }
 
@@ -339,36 +313,11 @@ if (is_osx) {
     setWindowButontsAndIcon(true);
 }
 
-event click $(div.chaticon) {
-    checkClickTime(function() {
-        show_chat = !show_chat;
-        adaptSizeForChat();
-        if (show_chat) {
-            view.focus = $(.outline-focus);
-        }
-    });
-}
-
 function checkClickTime(callback) {
-    var click_callback_time = getTime();
-    handler.check_click_time(body.cid);
-    self.timer(120ms, function() {
-        var d = click_callback_time - handler.get_click_time();
-        if (d > 120)
-            callback();
-    });
-}
-
-function adaptSizeForChat() {
-    $(div.right-panel).style.set {
-        display: show_chat ? "block" : "none",
-    };
-    var (x, y, w, h) = view.box(#rectw, #border, #screen);
-    if (show_chat && w < scaleIt(600)) {
-        view.move(x - (scaleIt(600) - w), y, scaleIt(600), h);
-    } else if (!show_chat && w > scaleIt(450)) {
-        view.move(x + (w - scaleIt(300)), y, scaleIt(300), h);
-    }
+    // One session is on show at a time, so the id is the selected tab's - the same rule
+    // as cm.tis. `checkClickTimeFor` in common.tis is the one implementation; the session
+    // panel passes the id of the card that was clicked instead.
+    checkClickTimeFor(body.cid, callback);
 }
 
 function update() {
@@ -415,6 +364,7 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         keyboard: keyboard, clipboard: clipboard, msgs: [], unreaded: 0,
         audio: audio, file: file, restart: restart, recording: recording,
         block_input:block_input, privacy_mode:privacy_mode,
+        pending_control: false, pending_permission: "",
         disconnected: false
     };
     if (idx < 0) {
@@ -432,6 +382,17 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
             setWindowState(View.WINDOW_MINIMIZED);
         });
     }
+}
+
+handler.updateControlRequest = function(id, pending, permission) {
+    connections.map(function(c) {
+        if (c.id == id) {
+            c.pending_control = pending;
+            // Which permission is being asked for, empty for the keyboard and mouse.
+            c.pending_permission = permission;
+        }
+    });
+    update();
 }
 
 handler.removeConnection = function(id, close) {
@@ -452,30 +413,14 @@ handler.removeConnection = function(id, close) {
     }
 }
 
-handler.newMessage = function(id, text) { 
-    var idx = -1;
-    connections.map(function(c, i) {
-        if (c.id == id) idx = i;
-    });
-    var conn = connections[idx];
-    if (!conn) return;
-    conn.msgs.push({name: conn.name, text: text, time: getNowStr()});
-    bring_to_top(idx);
-    if (idx == body.cur) {
-        var shouldAdapt = !show_chat;
-        show_chat = true;
-        if (shouldAdapt) adaptSizeForChat();
-    }
-    conn.unreaded += 1;
-    update();
-}
+// There is no chat on this page, but a message can still arrive - a peer typing to a
+// machine nobody is sitting at. It is dropped rather than refused: the connection is the
+// same one cm.tis would have shown it on, and that window is not open here.
+handler.newMessage = function(id, text) {}
 
-handler.showElevation = function(show) {
-    if (show != show_elevation) {
-        show_elevation = show;
-        update();
-    }
-}
+// Never asked for: nothing is drawn to elevate from. The hook stays because the server
+// reports the state to every connection manager, this one included.
+handler.showElevation = function(show) {}
 
 view << event statechange {
     adjustBorder();

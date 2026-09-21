@@ -392,6 +392,44 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                     },
                 }
             }
+            // The other call that is not about one session: the caller is a program
+            // that does not hold a session id, so the switch goes to every live one.
+            // A caller that does have an id names it through `Permission`.
+            LocalApiAction::Voice { enabled } => {
+                // The policy the panel's own switches obey, see `switch_permission`,
+                // checked here as well so the caller is told instead of the request
+                // being logged and dropped.
+                if !permission_change_allowed() {
+                    return LocalApiReply::Conflict {
+                        reason: "permissions cannot be changed in the accept window".to_owned(),
+                    };
+                }
+                let ids: Vec<i32> = CLIENTS
+                    .read()
+                    .unwrap()
+                    .iter()
+                    .filter(|(_, c)| !c.disconnected)
+                    .map(|(id, _)| *id)
+                    .collect();
+                if ids.is_empty() {
+                    // Voice lives inside a session. With none running there is
+                    // nothing to switch, and saying so beats reporting a switch
+                    // that went nowhere.
+                    return LocalApiReply::Conflict {
+                        reason: "no live session".to_owned(),
+                    };
+                }
+                let count = ids.len();
+                for id in ids {
+                    // The same pair the `Permission` arm uses: the switch goes out to the
+                    // connection first, then the state this process reports is updated.
+                    switch_permission(id, "audio".to_owned(), enabled);
+                    self.set_permission_locally(id, "audio", enabled);
+                }
+                LocalApiReply::Ok {
+                    data: format!("{{\"enabled\":{},\"sessions\":{}}}", enabled, count),
+                }
+            }
             _ if !exists => LocalApiReply::NotFound,
             LocalApiAction::Approve { accept } => {
                 if authorized {
@@ -577,19 +615,12 @@ pub fn send_chat(id: i32, text: String) {
 #[inline]
 #[cfg(not(any(target_os = "ios")))]
 pub fn switch_permission(id: i32, name: String, enabled: bool) {
-    // The whitelist is checked here and not only where the local API parses a request: the
-    // session panel and the Flutter front end call this straight, and a permission that is
-    // not offered has to be refused whichever door it comes in by.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if permission_switch_available(&name).is_err() {
-        log::warn!(
-            "ignored switch_permission for a permission this client does not offer, conn_id={}, permission={}, enabled={}",
-            id,
-            name,
-            enabled
-        );
-        return;
-    }
+    // No name check here: this is the call the connection-manager windows make, and the
+    // original one offers all eight switches, restart/recording/block_input/privacy_mode
+    // included - refusing them here would leave icons that flip for a moment and change
+    // nothing. The four-channel set belongs to the doors that draw it: cm_sh.tis only has
+    // those rows, and the local API checks `permission_switch_available` on its own
+    // doorstep.
     #[cfg(target_os = "android")]
     let is_keyboard_permission = name == "keyboard";
     #[cfg(not(target_os = "android"))]
@@ -742,17 +773,20 @@ pub fn switch_back(id: i32) {
     };
 }
 
-/// The permissions a caller may name, i.e. the ones the panel draws a switch for.
+/// The permissions a caller may name over the local API, i.e. the ones the session panel
+/// draws a switch for.
 ///
-/// Kept as a list rather than passed through: `switch_permission` hands whatever name
-/// it is given to the server, and a server is the wrong place to find out that a third
-/// party spelled one wrong.
+/// Kept as a list rather than passed through: a name that is not offered has to be refused
+/// where it arrives, and a third party spelling one wrong is a caller mistake, not
+/// something to discover at the server.
 ///
 /// These four are the A-class channels of the client integration design (§7.1): the ones
-/// that stay shut until the local user opens them for a session. The rest are not
-/// switchable at all and have no name here - remote restart, blocking input and privacy
-/// mode are not offered at all, and recording is part of the session rather than a
-/// permission anybody gets to toggle.
+/// that stay shut until the local user opens them for a session. The rest are not offered
+/// *here* - remote restart, blocking input and privacy mode are not offered at all, and
+/// recording is part of the session rather than a permission a caller gets to name.
+/// They are still on the original connection-manager window's own switches (`--ui`,
+/// cm.tis), which is upstream's interface and keeps all eight; that is why this list lives
+/// on the local API's doorstep instead of inside `switch_permission`.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn permission_switch_available(name: &str) -> Result<(), String> {
     match name {
@@ -878,23 +912,32 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     );
                                 }
                                 Data::SwitchPermission { name, enabled } => {
-                                    // Keep this branch scoped to privacy mode rollback.
-                                    // Other CM permission toggles are updated optimistically by the UI itself.
-                                    // The backend currently sends SwitchPermission back to CM only when
-                                    // privacy-mode turn-off fails and the UI state must be restored.
-                                    if name == "privacy_mode" {
-                                        let client = {
-                                            let mut clients = CLIENTS.write().unwrap();
-                                            clients.get_mut(&self.conn_id).map(|c| {
+                                    // The window's own toggles are updated optimistically by the
+                                    // page when a person clicks them, so the backend sends this back
+                                    // only where the page's guess can be wrong: a privacy-mode
+                                    // turn-off that failed, and the keyboard row, which is not just
+                                    // a permission - it is the control gate, and the prompt, the
+                                    // local API and the timeout all move it without a click here.
+                                    let client = {
+                                        let mut clients = CLIENTS.write().unwrap();
+                                        clients.get_mut(&self.conn_id).and_then(|c| match name.as_str() {
+                                            "privacy_mode" => {
                                                 c.privacy_mode = enabled;
-                                                c.clone()
-                                            })
-                                        };
-                                        if let Some(client) = client {
-                                            // This reuses add_connection(), and cm.tis only selectively updates
-                                            // existing rows (authorized/privacy_mode) for this fallback path.
-                                            self.cm.ui_handler.add_connection(&client);
-                                        }
+                                                Some(c.clone())
+                                            }
+                                            "keyboard" => {
+                                                c.keyboard = enabled;
+                                                Some(c.clone())
+                                            }
+                                            _ => None,
+                                        })
+                                    };
+                                    if let Some(client) = client {
+                                        // This reuses add_connection(): cm.tis takes only
+                                        // authorized/privacy_mode for a session it already has,
+                                        // cm_sh.tis redraws everything. `GET /sessions` reads the
+                                        // same field, so it is right either way.
+                                        self.cm.ui_handler.add_connection(&client);
                                     }
                                 }
                                 Data::FS(mut fs) => {

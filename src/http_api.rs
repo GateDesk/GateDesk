@@ -471,32 +471,49 @@ fn handle_password(mut request: Request) {
     }
 }
 
-/// Toggle voice by driving the global `audio-input` option (which restarts the
-/// audio service). This is a PoC approximation of per-session voice: the exact
-/// session-level toggle needs a live in-process `Session` handle, which the
-/// process-spawn connect model does not hold.
+/// Toggle voice: the operator's request to hear what this machine is playing.
+///
+/// Worth being explicit about what this is not. Voice is the audio channel of the
+/// live sessions, so this flips the `audio` permission on every session this machine
+/// currently has - the same permission the session panel's audio row flips, and the
+/// same one `POST /permission` can name. With no session running there is nothing to
+/// switch to, and the caller is told so rather than left believing it worked.
+///
+/// It used to write the `audio-input` option instead. That option holds the recording
+/// device's *name*, so the "Y" written there made the audio service look for a device
+/// called "Y", fall back to the default input device and, on a machine with no
+/// microphone, fail to start at all: the permission was granted and no sound came out.
 fn handle_voice(mut request: Request) {
     let body = read_body(&mut request, MAX_BODY_BYTES);
     match json_field(&body, "enabled") {
         Some(v) if v == "true" || v == "false" => {
             let on = v == "true";
-            crate::ui_interface::set_option(
-                "audio-input".to_owned(),
-                if on { "Y" } else { "" }.to_owned(),
-            );
+            let reply = match cm_call(LocalApiCall {
+                id: 0,
+                action: LocalApiAction::Voice { enabled: on },
+            }) {
+                Ok(reply) => reply,
+                Err((status, reason)) => return respond(request, status, error_body(&reason)),
+            };
+            // Recorded as err when the manager refused it (no session, or the policy
+            // that locks permissions in the accept window): the event is what says the
+            // platform asked, and the reason is in the response the caller got.
             crate::audit::record(
                 if on { "voice.on" } else { "voice.off" },
                 "operator",
                 0,
-                "ok",
+                match &reply {
+                    LocalApiReply::Ok { .. } => "ok",
+                    _ => "err",
+                },
                 serde_json::json!({"method": "http-api"}),
             );
-            respond(request, 200, format!("{{\"ok\":true,\"enabled\":{}}}", on));
+            respond_reply(request, reply, "result");
         }
         _ => respond(
             request,
             400,
-            "{\"ok\":false,\"error\":\"missing or invalid enabled\"}".to_owned(),
+            error_body("missing or invalid enabled"),
         ),
     }
 }

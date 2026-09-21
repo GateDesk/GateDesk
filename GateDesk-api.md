@@ -19,8 +19,8 @@ GateDesk 客户端进程内嵌一个仅限本机访问的 HTTP 服务，供**本
 
 | 类别 | 本机角色 | 端点 | 状态存放在 |
 |------|---------|------|-----------|
-| 主动连接 | 控制端 | `/id`、`/connect`、`/disconnect`、`/request-control`、`/request-permission`、`/password`、`/voice`、`/status` | 本进程（含本 API 启动的会话窗口；两种请求经进程内通道交给会话进程，§6.9 / §6.10） |
-| 会话与批准 | **被控端** | `/sessions`、`/approve`、`/control`、`/permission`、`/terminate`、`/dismiss` | 连接管理器进程（§6.7）；本 API 通过进程内通道与其通信 |
+| 主动连接 | 控制端 | `/id`、`/connect`、`/disconnect`、`/request-control`、`/request-permission`、`/password`、`/status` | 本进程（含本 API 启动的会话窗口；两种请求经进程内通道交给会话进程，§6.9 / §6.10） |
+| 会话与批准 | **被控端** | `/sessions`、`/approve`、`/control`、`/permission`、`/terminate`、`/dismiss`、`/voice` | 连接管理器进程（§6.7）；本 API 通过进程内通道与其通信 |
 
 ## 2. 安全要求（设计硬约束）
 
@@ -230,7 +230,7 @@ curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: a
 {"ok":true}
 ```
 
-### 6.6 语音开关
+### 6.6 语音开关（受控端）
 
 ```
 POST /voice
@@ -238,7 +238,11 @@ POST /voice
 
 请求体：`{"enabled":true|false}`（JSON）
 
-启用/关闭语音输入。**PoC 说明**：精确的会话级语音开关需进程内会话句柄，本接口以全局 `audio-input` 配置近似（该配置变更会触发音频服务重启）。
+把**本机作为被控端**当前所有活动会话的 `audio` 权限打开/关闭——即让对端能不能听到本机的声音。这与会话面板里的 `audio` 开关、以及 `POST /permission {"name":"audio"}` 是同一件事，只是不需要先知道会话 id。
+
+没有活动会话时返回 **409 `{"ok":false,"error":"no live session"}`**：语音是会话内的开关，本接口不落成全局配置（历史版本曾把 `audio-input` 当开关写，那是录音设备名，会直接让音频服务起不来——详见附录 A）。
+
+> 不要把它当成“本机麦克风总开关”或“声音设备选择”：设备选择请改 `[options] audio-input`（设备名，留空=系统默认，Windows 上即系统声音）。
 
 **请求示例**
 
@@ -249,8 +253,13 @@ curl -X POST "http://127.0.0.1:21120/voice?token=<token>" -H "Content-Type: appl
 **成功响应（200）**
 
 ```json
-{"ok":true,"enabled":true}
+{"ok":true,"result":{"enabled":true,"sessions":1}}
 ```
+
+| 字段 | 说明 |
+|------|------|
+| enabled | 本次写入的权限值 |
+| sessions | 被改动的活动会话数 |
 
 ### 6.7 会话与批准（受控端）
 
@@ -288,7 +297,7 @@ GET /sessions
       "is_view_camera": false,
       "is_terminal": false,
       "port_forward": "",
-      "keyboard": true,
+      "keyboard": false,
       "clipboard": false,
       "audio": false,
       "file": false,
@@ -309,7 +318,8 @@ GET /sessions
 | id | int | 会话标识，其余接口用它寻址 |
 | authorized | bool | 是否已放行；`false` 且 `disconnected: false` 即**正在请求接入** |
 | disconnected | bool | 会话是否已结束（仍留在列表里，可用 `/dismiss` 清理） |
-| pending_control | bool | 是否有**待应答的控制请求**（对应面板上的「允许 / 拒绝」提示） |
+| pending_control | bool | 是否有**待应答的控制请求**（对应窗口里的「允许 / 拒绝」提示） |
+| keyboard | bool | **对端当前能不能驱动本机键鼠**：权限与会话批准两样都成立才为 `true`，即控制层 `peer_input_enabled()` 的值。与连接管理器窗口里键盘那一行是同一个值 —— 界面写「允许」就必须真的能控制，否则现场的人无从判断（v1.14） |
 | peer_id | string | 对端设备 ID |
 | name | string | 对端名称 |
 | other fields | — | 各项权限的当前值，与面板上的开关一一对应 |
@@ -372,6 +382,8 @@ curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":3,\"acce
 
 **审计**：允许 → `control.approve`；拒绝 → `control.deny`；超时 → `control.timeout`。
 
+**另一道门**：本接口不是唯一的决定入口。本机用户在连接管理器窗口里点开键盘图标，同样是「同意控制」（上游一直就是这个语义，本客户端保持它）；关掉图标则是收回控制（§6.7.4）。两条路落到同一处，所以状态与审计不会出现两种说法。
+
 #### 6.7.4 开关权限
 
 ```
@@ -399,9 +411,11 @@ curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"n
 **边界**
 
 - 只有这四个名字。远程重启、阻止用户输入、隐私模式本客户端不提供；录制会话随会话默认开启，不是可切换项。传其他名字一律返回 400 `unknown permission`。
+- **这是本接口与会话面板的边界，不是本机用户本人的边界**：`--ui` 打开的原始 CM 窗口仍是上游那八个开关（含远程重启 / 录制 / 阻止输入 / 隐私模式），由坐在机器前的人自己切换，两者不冲突。界面上两条路径：`--ui` = 原始 CM 窗口（`cm.tis`，上游原样），非 `--ui`（`--gd-panel`）= 定制界面（`cm_sh.tis`，由原始 CM 窗口复制而来，只画 A 类四项并接对端申请提示）。
 - 这四项在会话建立时都是关闭的。对端可以开口要，但要不到：请求只是把「有人想开」摆到本机用户眼前（§6.10），**答案始终由本机用户给**。本接口和受控端会话面板是仅有的两个决定入口，且走的是同一批动作。
 - 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，除 `keyboard` 外一律拒绝，返回 409；这一条同样管着应答许可请求（§6.10），即锁定后对端问了也开不了。
-- 打开 `keyboard` **不等于**授权控制：控制授权是独立闸门（§6.7.3），两者都满足才真正放开输入。
+- 打开 `keyboard` **就是**授权控制：本机用户点开键盘图标（或本接口打开 `keyboard`）与 §6.7.3 应答一次控制请求等价，两者都写同一个闸门；关掉 `keyboard` 则收回控制，会话退回只读。区别只在「谁来点」—— 闸门本身是一处。
+  - 所以 `--ui` 那条路径不需要提示：原始 CM 窗口没有「对端申请控制」的提示条，对端开口只是让服务端记下一个 60 秒的待办，现场的人在窗口上点键盘图标即可放行；没有人点就超时按拒绝处理。
 
 **审计**：`permission.change`（见 §6.8）。
 
@@ -458,7 +472,7 @@ POST /dismiss
 - 统一载荷：`{action, actor, device_id, session_id, ts, result, extra}`（JSON Lines）。
 - 本地兜底：始终追加写入日志目录下的 `audit.log`（每行一条 JSON），不阻塞主流程，断网上报也不丢记录。
 - 转发上报：若 `[options] audit-server-url` 已配置（如 GateDeskWeb 的 `http://<ip>:3000/api/audit`），事件以异步 POST 转发到该端点；失败静默（本地已兜底）。
-- 由本 API 引发的动作：`/password` 成功/失败 → `auth.grant`；`/connect` → `connect.start`（ok/err）；`/disconnect` 实际关闭会话 → `connect.close`；`/voice` → `voice.on` / `voice.off`。
+- 由本 API 引发的动作：`/password` 成功/失败 → `auth.grant`；`/connect` → `connect.start`（ok/err）；`/disconnect` 实际关闭会话 → `connect.close`；`/voice` → `voice.on` / `voice.off`（被拒时 result=`err`）。
 - 受控端会话动作（v1.8）：放行接入 → `login.approve`；拒绝接入 → `login.deny`；允许控制 → `control.approve`；拒绝控制 → `control.deny`；控制请求超时 → `control.timeout`；结束会话 → `session.terminate`；改权限 → `permission.change`。这些事件**在真正执行的连接层记录**，所以无论动作来自会话面板还是本 API，日志一致且都带着会话号与对端 ID —— 代价是日志里看不出动作是谁发起的（平台侧需自行留日志）。
 - 会话内操作（控制端会话窗口/受控端执行点）也产生事件：`record.start/stop`、`remote.restart`、`privacy.on/off`、`block_input.on/off`、`voice.on/off`。
 
@@ -554,7 +568,7 @@ curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id
 | 403 | Host 头非 localhost/127.0.0.1，或 `Origin` 非受信来源（v1.7） |
 | 404 | 未知路径；或会话接口中 `id` 对应的会话不存在（v1.8） |
 | 405 | 方法不允许 |
-| 409 | 会话当前状态与该动作不符：应答一个并不存在的控制请求、放行一个已经放行的对端、结束一个已经结束的会话、在权限被运维锁定时改权限（v1.8） |
+| 409 | 会话当前状态与该动作不符：应答一个并不存在的控制请求、放行一个已经放行的对端、结束一个已经结束的会话、在权限被运维锁定时改权限（v1.8）、`/voice` 在本机没有活动会话时调用（v1.12） |
 | 413 | 请求体 `Content-Length` 超过 1024 字节（v1.7） |
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
 | 503 | 本机当前没有连接管理器在监听（即无会话、无会话面板窗口），会话类接口无法执行（v1.8）；或 `/request-control` / `/request-permission` 找不到该对端的会话进程（v1.9 / v1.11） |
@@ -640,6 +654,9 @@ curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-21 | 1.14 | 修正受控端界面的键鼠显示：连接管理器窗口里键盘那一行此前读的是权限（默认开），而真正的输入闸门 `control_authorized` 默认关 —— 界面写「允许」但敲不进一个字。现在该行与 `GET /sessions` 的 `keyboard` 字段都是 `peer_input_enabled()`，即权限与会话批准同时成立才为真（§6.7.1）；会话批准被本机 API、窗口里的提示或 60 秒超时改变时，连接层会把新值回推给窗口 |
+| 2026-09-21 | 1.13 | 受控端界面拆成两套：`--ui` 用原始 CM 窗口（`cm.tis`，与上游逐字一致），非 `--ui` 用定制界面（`cm_sh.tis`）。相应更正 §6.7.4：打开 `keyboard` 权限**即**授权控制（与 §6.7.3 写同一个闸门），关掉则收回——连接管理器窗口里点键盘图标一直是这个语义，此前被独立闸门隔开，导致还原成上游界面后现场无人能放行；§6.7.3 补充「另一道门」 | 
+| 2026-09-21 | 1.12 | `POST /voice`（§6.6）从「写全局 `audio-input` 配置」改为「切换本机所有活动会话的 `audio` 权限」：原实现把录音设备名当布尔开关写，受控端音频服务随即以 `Failed to get default input device for loopback` 启动失败——权限给对了也没有声音；无活动会话时返回 409，响应体改为 `{"ok":true,"result":{"enabled":…,"sessions":…}}`；启动时自动清除历史遗留的 `audio-input = 'Y'`；附录 A 更正 `audio-input` 的语义（设备名，留空=系统默认）；连接级审计上报接受平台 `{"code":0,…}` 成功信封（此前只认空 body，导致每条记录重试三次后被丢弃）；§6.7.4 补充两条界面路径的权限开关边界 |
 | 2026-09-21 | 1.11 | 新增控制端端点 `POST /request-permission`（§6.10）：向已打开的会话请求对端开启一项 A 类权限（`clipboard` / `audio` / `file`），经进程内通道按对端 ID 投递给会话进程，等价于「请求键鼠控制」；协议新增 `OptionMessage.request_permission` 字段，`disable_*` 说的是「我要关」而它说的是「可以吗」，答案仍由对端本机用户在本地确认界面上给；相应修正 §6.7.4 的措辞——对端可以开口要，但决定入口仍只有本接口与会话面板 |
 | 2026-09-21 | 1.10 | `POST /permission`（§6.7.4）的权限名收敛到 `keyboard` / `clipboard` / `audio` / `file` 四项：远程重启、阻止用户输入、隐私模式不再提供，录制会话不再是可切换项；这四项在会话建立时固定为关闭，对端的权限请求不能再代替本机用户打开它们（具体见客户端集成设计方案 §7.1 的三类划分） |
 | 2026-09-20 | 1.9 | 新增控制端端点 `POST /request-control`（§6.9）：向已打开的会话请求对端键鼠控制，经进程内通道按对端 ID 投递给会话进程，等价于远程窗口菜单里的「请求控制」；新增 503（无该对端的会话进程）与 504（会话进程未按期回应）说明 |
@@ -657,7 +674,7 @@ curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
 
 ## 附录 A：GateDesk2.toml 配置文件
 
-HTTP API 的鉴权 token（`api-token`）与语音开关（`audio-input`）等配置，均存放在 **GateDesk2.toml**（即 `Config2`）的 `[options]` 表中。本文档重点说明其位置、结构、数据来源、读取优先级、可维护键值以及常见坑。它是运维 / 部署脚本 / 调试时最重要的配置入口之一。
+HTTP API 的鉴权 token（`api-token`）与抓声设备（`audio-input`）等配置，均存放在 **GateDesk2.toml**（即 `Config2`）的 `[options]` 表中。本文档重点说明其位置、结构、数据来源、读取优先级、可维护键值以及常见坑。它是运维 / 部署脚本 / 调试时最重要的配置入口之一。
 
 ### A.1 配置文件的作用与版本关系
 
@@ -690,7 +707,7 @@ GateDesk 维护两份配置文件：
 | `api-token` | 任意字符串（建议高强度随机） | 本地 HTTP API 的认证令牌。`http_api.rs` 会读取 `get_option("api-token")`；空值表示“未配置”，所有接口返回 `401` 且响应体为 `{"error":"api-token not configured"}`。一般由脚本或手工编辑配置文件写入。 |
 | `audit-server-url` | 审计服务端上报地址（v1.7，可空） | 操作级审计事件的转发端点（如 GateDeskWeb 的 `http://127.0.0.1:3000/api/audit`）；为空时仅写本地 `audit.log`。 |
 | `api-cors-origin` | 逗号分隔的业务页面来源（v1.7，可空） | 本地 API 在 CORS 收紧策略下额外放行的来源（如 `http://192.168.1.10:3000`），与默认放行的 localhost/127.0.0.1 互补。 |
-| `audio-input` | `Y` 表示启用，空字符串或删除表示禁用 | 语音输入总开关。`POST /voice` 会写入此键；值为空时会被 `set_option` 从表里删除。该变更会触发音频服务重启。 |
+| `audio-input` | 录音设备名；留空 = 系统默认 | 抓声通道的**设备选择**，不是开关。留空时 Windows 上抓的是默认**输出**设备的 WASAPI loopback（本机系统声音），非空则按名字找设备、找不到就退回默认录音设备（无声卡输入的机器会因此启动失败）。`POST /voice` 不再写入此键（v1.12）；历史上被写进去的 `Y` 会在启动时自动清除（`common::drop_bogus_audio_input`）。 |
 | `custom-rendezvous-server` | 服务端地址字符串 | 自定义 rendezvous 服务器。配置可能影响连接路由和注册流程。 |
 | `relay-server` | relay 地址字符串 | 中继服务器配置，通常用于穿透/中继场景。 |
 | `api-server` | API 服务器地址 | 与 GateDesk 业务后台或网关通信相关。 |
@@ -724,10 +741,10 @@ audit-server-url = ''
 api-cors-origin = ''
 
 # ==============================
-# 语音输入开关
-# 'Y' = 启用, 空字符串 = 禁用
+# 抓声设备（设备名，留空 = 系统默认）
+# Windows 留空 = 默认输出设备的 loopback（系统声音）
 # ==============================
-audio-input = 'Y'
+# audio-input = 'Microphone (Realtek(R) Audio)'
 
 # ==============================
 # 远程连接 / 中继相关

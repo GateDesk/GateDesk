@@ -331,6 +331,13 @@ pub enum LocalApiAction {
     Control { accept: bool },
     /// Flip one permission: the panel's switches.
     Permission { name: String, enabled: bool },
+    /// Flip the audio permission on every live session: `POST /voice`.
+    ///
+    /// Voice is the one switch the local API offers without naming a session - a
+    /// caller that holds a session id asks through `Permission` instead. It is the
+    /// audio channel of the sessions, so it is the same permission the panel's
+    /// audio row flips.
+    Voice { enabled: bool },
     /// End a session: the panel's Disconnect.
     Terminate,
     /// Drop a session that has already ended: the panel's Close.

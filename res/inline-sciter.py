@@ -37,6 +37,13 @@ panel = open('src/ui/panel.html').read() \
     .replace('@import url(panel.css);', open('src/ui/panel.css').read()) \
     .replace('include "panel.tis";', open('src/ui/panel.tis').read())
 
+# The connection manager in the skin the headless form uses. It has its own copy of the
+# window's style sheet, so the four switches it draws can be styled without reaching into
+# the original window's css.
+cm_sh = open('src/ui/cm_sh.html').read() \
+    .replace('@import url(cm_sh.css);', open('src/ui/cm_sh.css').read()) \
+    .replace('include "cm_sh.tis";', open('src/ui/cm_sh.tis').read())
+
 
 def compress(s):
     s = s.replace("\r\n", "\n")
@@ -54,6 +61,7 @@ with open('src/ui/inline.rs', 'wt') as fh:
     fh.write('const _INSTALL: ' + compress(strip(install)) + ';\n')
     fh.write('const _CONNECTION_MANAGER: ' + compress(strip(cm)) + ';\n')
     fh.write('const _PANEL: ' + compress(strip(panel)) + ';\n')
+    fh.write('const _CM_SH: ' + compress(strip(cm_sh)) + ';\n')
     fh.write('''
 fn get(data: &[u8]) -> String {
     String::from_utf8_lossy(data).to_string()
@@ -87,5 +95,9 @@ pub fn get_cm() -> String {
 #[inline]
 pub fn get_panel() -> String {
     replace(&_PANEL[..])
+}
+#[inline]
+pub fn get_cm_sh() -> String {
+    replace(&_CM_SH[..])
 }
 ''')

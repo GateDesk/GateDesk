@@ -749,6 +749,12 @@ impl Connection {
                             log::info!("Change permission {} -> {}", name, enabled);
                             if &name == "keyboard" {
                                 conn.keyboard = enabled;
+                                // The keyboard switch is this window's answer to the control
+                                // gate as well as a permission: see `set_control_authorized`.
+                                // Doing it here is also what makes the line below honest -
+                                // afterwards `enabled` and `peer_input_enabled()` are the
+                                // same thing, and that is what the peer is told.
+                                conn.set_control_authorized(enabled);
                                 conn.send_permission(Permission::Keyboard, enabled).await;
                                 if let Some(s) = conn.server.upgrade() {
                                     s.write().unwrap().subscribe(
@@ -1669,8 +1675,12 @@ impl Connection {
                 match crate::post_request_with_status(url.clone(), body.clone(), "").await {
                     Ok((status, text)) => {
                         if (200..300).contains(&status) {
-                            // Success is an empty body. hbbs reports handler
-                            // failures (e.g. a db write error) as 200 with an
+                            // Success is an empty body, or the api server's own
+                            // envelope with code 0: the enterprise platform answers
+                            // {"code":0,"message":"success","data":""} and never
+                            // an empty body, so insisting on one turned every stored
+                            // record into a retry that ended up dropped. hbbs reports
+                            // handler failures (e.g. a db write error) as 200 with an
                             // {"error": ...} body - retryable: the server
                             // releases the record's nonce when its write fails,
                             // so trying again is what stores the record. Any
@@ -1681,10 +1691,21 @@ impl Connection {
                             if text.trim().is_empty() {
                                 return Ok(text);
                             }
-                            let server_err = serde_json::from_str::<Value>(&text)
-                                .ok()
-                                .and_then(|v| v.get("error")?.as_str().map(|s| s.to_owned()))
-                                .filter(|e| !e.is_empty());
+                            let parsed = serde_json::from_str::<Value>(&text).ok();
+                            if parsed
+                                .as_ref()
+                                .and_then(|v| v.get("code"))
+                                .and_then(|code| code.as_i64())
+                                == Some(0)
+                            {
+                                return Ok(text);
+                            }
+                            let server_err = parsed
+                                .as_ref()
+                                .and_then(|v| v.get("error").or_else(|| v.get("message")))
+                                .and_then(|e| e.as_str())
+                                .filter(|e| !e.is_empty() && *e != "success")
+                                .map(|s| s.to_owned());
                             let (label, detail) = match &server_err {
                                 Some(e) => ("server error", e.as_str()),
                                 None => ("unexpected response body", text.as_str()),
@@ -2318,6 +2339,10 @@ impl Connection {
             pending: false,
             permission: String::new(),
         });
+        // A denied or timed-out request leaves the peer unable to type, and the window's
+        // row has to say so: the prompt going away is not the same as the row going back,
+        // and the page drew the row on the assumption that the person had allowed it.
+        self.sync_cm_keyboard();
     }
 
     /// The permissions a peer may ask for by name.
@@ -2327,6 +2352,56 @@ impl Connection {
     /// looking allowed while still refusing every keystroke.
     fn is_requestable_permission(name: &str) -> bool {
         matches!(name, "clipboard" | "audio" | "file")
+    }
+
+    /// Take the local user's keyboard switch as their answer to the control gate.
+    ///
+    /// Upstream lets the person at this machine hand the keyboard over by clicking that
+    /// switch, and this client keeps the same meaning for it: `control_authorized` is
+    /// what `peer_input_enabled` checks, so a switch that only flipped the permission
+    /// would leave the session looking allowed while every keystroke was still dropped.
+    /// The original connection-manager window draws no prompt, so that switch is the only
+    /// door it has; the prompt in `cm_sh.tis` is a second one, and both end in the state
+    /// this reaches.
+    ///
+    /// Turning the switch off takes control back, which is what clicking it a second time
+    /// means.
+    fn set_control_authorized(&mut self, authorized: bool) {
+        self.control_authorized = authorized;
+        if authorized {
+            // The other half of what the prompt's Allow button does: the peer asked for the
+            // keyboard with `disable_keyboard`, and that request is now granted.
+            self.disable_keyboard = false;
+            // A request for the keyboard has just been answered by hand. Left outstanding it
+            // would time out sixty seconds later and deny the control that was granted here,
+            // so it comes down now - the same clearing `resolve_control_request` does, for the
+            // same reason. A named request is a different prompt and is left alone.
+            if self.control_requested && self.control_request_permission.is_empty() {
+                self.control_requested = false;
+                self.control_request_deadline = None;
+                self.send_to_cm(ipc::Data::ControlRequest {
+                    pending: false,
+                    permission: String::new(),
+                });
+            }
+        }
+        // The switch that was just clicked is the window's keyboard row, and what it says
+        // now has to be what the row shows - this answer did not come from the window when
+        // it came from the local API, and it came from nobody at all when it came from the
+        // timeout below.
+        self.sync_cm_keyboard();
+    }
+
+    /// Tell the connection manager what its keyboard row should say.
+    ///
+    /// The row is the peer's ability to type rather than the permission, so anything that
+    /// moves `control_authorized` moves the row as well. The window's own click is already
+    /// drawn optimistically by the page; this is for the other two doors.
+    fn sync_cm_keyboard(&mut self) {
+        self.send_to_cm(ipc::Data::SwitchPermission {
+            name: "keyboard".to_owned(),
+            enabled: self.peer_input_enabled(),
+        });
     }
 
     fn clipboard_enabled(&self) -> bool {
@@ -2367,7 +2442,12 @@ impl Connection {
             name,
             avatar: self.lr.avatar.clone(),
             authorized,
-            keyboard: self.keyboard,
+            // What the window's keyboard row means: whether this peer may drive the keyboard
+            // *now*. The permission alone is not that - the session also has to have been
+            // approved (`peer_input_enabled`) - and a row reading "allowed" while every
+            // keystroke is dropped is a lie the person at this machine has no way to see
+            // through. `keyboard` in the window is therefore the pair of them.
+            keyboard: self.peer_input_enabled(),
             clipboard: self.clipboard,
             audio: self.audio,
             file: self.file,

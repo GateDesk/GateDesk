@@ -54,14 +54,15 @@ mod panel_window {
         CallWindowProcW, GetWindowLongW, SetWindowLongPtrW, SetWindowLongW, SetWindowPos,
         ShowWindow, GWLP_WNDPROC, GWL_STYLE, SC_CLOSE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE,
         SWP_NOZORDER, SW_MINIMIZE, WM_CLOSE, WM_SYSCOMMAND, WNDPROC, WS_MAXIMIZEBOX,
+        WS_THICKFRAME,
     };
 
     /// Sciter's own window procedure, which every message we do not act on is passed on to.
     /// There is one panel per process, so a plain static is enough.
     static SCITER_PROC: AtomicIsize = AtomicIsize::new(0);
 
-    /// Give the panel the title bar it wants: the close button minimizes, and there is no
-    /// maximize box.
+    /// Give the panel the title bar it wants: the close button minimizes, there is no
+    /// maximize box, and the frame cannot be dragged to resize the window.
     pub fn tame_title_bar(hwnd: isize) {
         let hwnd = HWND(hwnd as *mut core::ffi::c_void);
         let panel_proc_address = panel_proc as usize;
@@ -73,11 +74,16 @@ mod panel_window {
             #[cfg(target_pointer_width = "32")]
             let sciter_proc = SetWindowLongW(hwnd, GWLP_WNDPROC, panel_proc_address as i32) as isize;
             SCITER_PROC.store(sciter_proc, Ordering::SeqCst);
-            // The panel is a fixed strip parked in a corner, so the only thing maximizing it
-            // could produce is a stretched list. Just that one bit goes - asking the builder
-            // for a `fixed()` window instead would take the minimize and close buttons with it.
+            // The panel is a fixed strip parked in a corner, so neither maximizing it nor
+            // dragging its edge can produce anything but a stretched list of rows. Those two
+            // bits go - asking the builder for a `fixed()` window instead would take the
+            // minimize and close buttons with it.
             let style = GetWindowLongW(hwnd, GWL_STYLE);
-            SetWindowLongW(hwnd, GWL_STYLE, style & !(WS_MAXIMIZEBOX.0 as i32));
+            SetWindowLongW(
+                hwnd,
+                GWL_STYLE,
+                style & !(WS_MAXIMIZEBOX.0 as i32) & !(WS_THICKFRAME.0 as i32),
+            );
             // The window is already on screen, so its non-client area needs telling to lay
             // itself out again before the missing button actually goes away.
             let _ = SetWindowPos(
@@ -210,18 +216,19 @@ pub fn start(args: &mut [String]) {
             .unwrap_or_default()
             == "true";
     } else if args[0] == "--gd-panel" {
-        // Session panel: what a headless client answers control requests in. Same handler as
-        // the connection manager, because the page drives the same permission calls.
+        // The connection manager in another skin: what a client started without `--ui`
+        // answers control requests in. Same handler as the original page, because it drives
+        // the same permission calls.
         frame.register_behavior("connection-manager", move || {
             Box::new(cm::SciterConnectionManager::new())
         });
-        // The panel is the only place the peer that is connected right now can be answered,
-        // and the server starts a new one only when the *next* connection arrives, so its
-        // close button may not take the process down: it minimizes the window instead, and
-        // the panel comes back to the front when the next request needs an answer.
+        // This is the only place the peer that is connected right now can be answered, and
+        // the server starts a new one only when the *next* connection arrives, so its close
+        // button may not take the process down: it minimizes the window instead, and the
+        // window comes back to the front when the next request needs an answer.
         #[cfg(windows)]
         panel_window::tame_title_bar(frame.get_hwnd() as isize);
-        page = "panel.html";
+        page = "cm_sh.html";
     } else if (args[0] == "--connect"
         || args[0] == "--file-transfer"
         || args[0] == "--port-forward"
@@ -267,6 +274,8 @@ pub fn start(args: &mut [String]) {
             inline::get_index()
         } else if page == "cm.html" {
             inline::get_cm()
+        } else if page == "cm_sh.html" {
+            inline::get_cm_sh()
         } else if page == "panel.html" {
             inline::get_panel()
         } else if page == "install.html" {

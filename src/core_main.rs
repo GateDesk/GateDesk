@@ -174,6 +174,11 @@ pub fn core_main() -> Option<Vec<String>> {
     }
     hbb_common::init_log(false, &log_name);
 
+    // Before anything reads the audio options: a value the old voice endpoint left in
+    // `audio-input` stops the audio service from starting at all, on every machine that
+    // called it. See `drop_bogus_audio_input`.
+    crate::common::drop_bogus_audio_input();
+
     // linux uni (url) go here.
     #[cfg(all(target_os = "linux", feature = "flutter"))]
     if args.len() > 0 && args[0].starts_with(&crate::get_uri_prefix()) {

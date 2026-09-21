@@ -322,6 +322,30 @@ pub fn set_sound_input(device: String) {
     }
 }
 
+/// Drop the `"Y"` the old `POST /voice` wrote into `audio-input`.
+///
+/// `audio-input` is the *name* of the recording device to capture; empty means the
+/// system default, which on Windows is the output device captured through WASAPI
+/// loopback - the machine's own sound. The voice endpoint used to write `"Y"` in
+/// there as a boolean flag, and a value that names no device makes the audio service
+/// look for a device called `"Y"`, find none, and fall back to the default *input*
+/// device, which on a machine without a microphone does not exist: the audio service
+/// fails to start and nothing reaches the peer, however the permissions were granted.
+///
+/// Runs at startup because machines that called the endpoint already carry that value,
+/// and a config left broken looks exactly like a permission that does not work - a
+/// long way round to find the real cause.
+pub fn drop_bogus_audio_input() {
+    const KEY: &str = "audio-input";
+    if get_option(KEY.to_owned()) == "Y" {
+        log::warn!(
+            "clearing {}: \"Y\" is the old voice flag, not a device name",
+            KEY
+        );
+        set_option(KEY.to_owned(), "".to_owned());
+    }
+}
+
 /// Get system's default sound input device name.
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
