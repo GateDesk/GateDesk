@@ -11,7 +11,6 @@ const CONTROL_TIMEOUT_SECONDS = 60;
 var body;
 var connections = [];
 var countdown_timer = null;
-var is_privacy_mode_supported = handler.get_supported_privacy_mode_impls() != '[]';
 // With `approve-mode` on password the peer is already past the door by the time it appears here,
 // so there is nothing to accept. Same rule as cm.tis.
 var show_accept = handler.get_option('approve-mode') != 'password';
@@ -72,21 +71,19 @@ function ensure_countdown() {
     });
 }
 
+// The four A-class channels - the ones that stay shut until the local user opens them, and the
+// only permissions this window gets to switch. Remote restart, blocking user input and privacy
+// mode are not offered at all, and recording is part of the session rather than a switch.
 function render_permissions(c) {
     var rows = [
-        ["keyboard", "Enable keyboard/mouse", c.keyboard, true],
-        ["clipboard", "Enable clipboard", c.clipboard, true],
-        ["audio", "Enable audio", c.audio, true],
-        ["file", "Enable file copy and paste", c.file, true],
-        ["restart", "Enable remote restart", c.restart, true],
-        ["recording", "Enable recording session", c.recording, true],
-        ["block_input", "Enable blocking user input", c.block_input, is_win],
-        ["privacy_mode", "Enable privacy mode", c.privacy_mode, is_privacy_mode_supported]
+        ["keyboard", "Enable keyboard/mouse", c.keyboard],
+        ["clipboard", "Enable clipboard", c.clipboard],
+        ["audio", "Enable audio", c.audio],
+        ["file", "Enable file copy and paste", c.file]
     ];
     return <div .perms>
         <div .perm-title>{translate('Permissions')}</div>
         {rows.map(function(r) {
-            if (!r[3]) return <div style="display:none" />;
             return <div class={r[2] ? "perm on" : "perm"} perm-name={r[0]}>
                 <div .perm-name>{translate(r[1])}</div>
                 <div .switch><div .switch-knob /></div>

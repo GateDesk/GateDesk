@@ -486,15 +486,26 @@ impl Connection {
             port_forward_address: "".to_owned(),
             tx_to_cm,
             authorized: false,
+            // Where each permission starts follows the three tiers of the client integration
+            // design (§7.1).
+            //
+            // A-class channels stay shut until the local user opens them for this session.
+            // `Self::permission` is deliberately not consulted for them: it lets the peer's
+            // own request decide, and the peer asking is not the local user answering.
+            // Keyboard only looks like an exception - it carries its own gate,
+            // `control_authorized`, which starts false as well.
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
-            clipboard: Self::permission(keys::OPTION_ENABLE_CLIPBOARD, &control_permissions),
-            audio: Self::permission(keys::OPTION_ENABLE_AUDIO, &control_permissions),
-            // to-do: make sure is the option correct here
-            file: Self::permission(keys::OPTION_ENABLE_FILE_TRANSFER, &control_permissions),
-            restart: Self::permission(keys::OPTION_ENABLE_REMOTE_RESTART, &control_permissions),
-            recording: Self::permission(keys::OPTION_ENABLE_RECORD_SESSION, &control_permissions),
-            block_input: Self::permission(keys::OPTION_ENABLE_BLOCK_INPUT, &control_permissions),
-            privacy_mode: Self::permission(keys::OPTION_ENABLE_PRIVACY_MODE, &control_permissions),
+            clipboard: false,
+            audio: false,
+            file: false,
+            // B-class: not offered in any interface, so there is nothing that could turn
+            // these on.
+            restart: false,
+            block_input: false,
+            privacy_mode: false,
+            // C-class: recording is what makes a session auditable, so it starts on and no
+            // switch anywhere turns it off.
+            recording: true,
             control_permissions,
             last_test_delay: None,
             network_delay: 0,

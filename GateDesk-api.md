@@ -381,7 +381,7 @@ POST /permission
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
 | id | 是 | int | 会话标识 |
-| name | 是 | string | `keyboard` / `clipboard` / `audio` / `file` / `restart` / `recording` / `block_input` / `privacy_mode` |
+| name | 是 | string | `keyboard` / `clipboard` / `audio` / `file` |
 | enabled | 是 | bool | 目标状态 |
 
 **请求示例**
@@ -398,7 +398,8 @@ curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"n
 
 **边界**
 
-- `block_input` 仅 Windows 可用；`privacy_mode` 需目标平台有对应实现。不支持时返回 400。
+- 只有这四个名字。远程重启、阻止用户输入、隐私模式本客户端不提供；录制会话随会话默认开启，不是可切换项。传其他名字一律返回 400 `unknown permission`。
+- 这四项在会话建立时都是关闭的，对端的权限请求不能代替本机用户打开它们：本接口和受控端会话面板是仅有的两个开启方式，且走的是同一批动作。
 - 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，除 `keyboard` 外一律拒绝，返回 409。
 - 打开 `keyboard` **不等于**授权控制：控制授权是独立闸门（§6.7.3），两者都满足才真正放开输入。
 
@@ -593,6 +594,7 @@ curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-21 | 1.10 | `POST /permission`（§6.7.4）的权限名收敛到 `keyboard` / `clipboard` / `audio` / `file` 四项：远程重启、阻止用户输入、隐私模式不再提供，录制会话不再是可切换项；这四项在会话建立时固定为关闭，对端的权限请求不能再代替本机用户打开它们（具体见客户端集成设计方案 §7.1 的三类划分） |
 | 2026-09-20 | 1.9 | 新增控制端端点 `POST /request-control`（§6.9）：向已打开的会话请求对端键鼠控制，经进程内通道按对端 ID 投递给会话进程，等价于远程窗口菜单里的「请求控制」；新增 503（无该对端的会话进程）与 504（会话进程未按期回应）说明 |
 | 2026-09-17 | 1.8 | 新增受控端会话接口（§6.7）：`GET /sessions` 列出会话与待办请求、`POST /approve` 批准/拒绝接入、`POST /control` 应答控制请求、`POST /permission` 开关权限、`POST /terminate` 结束会话、`POST /dismiss` 清理已结束会话；实现走进程内 `_cm` 通道，与受控端会话面板同一批动作（接口与面板状态互通）；新增审计事件 `login.approve` / `login.deny` / `session.terminate` / `permission.change`（§6.8）；错误码新增 409（会话状态不符）、503（无会话管理器）与 504（管理器未按期回复）；新增 §8.1 被控端无人值守批准流程 |
 | 2026-09-10 | 1.7 | 本地接口加固：Host 校验（仅 localhost/127.0.0.1，防 DNS Rebinding）、CORS 收紧（`Access-Control-Allow-Origin` 仅对受信来源回显，支持 `[options] api-cors-origin`）、请求体 1024B 上限（413）；`GET /status` 新增 `assistable`（本机已授权「可被协助」）；操作级审计：`/password→auth.grant`、`/connect→connect.start`、`/disconnect→connect.close`、`/voice→voice.on/off`，事件写本地 `audit.log`（JSON Lines）并可选转发 `[options] audit-server-url`（§6.7）；Unix 下启动时对配置文件 chmod 0600 |

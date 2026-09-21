@@ -590,6 +590,19 @@ pub fn send_chat(id: i32, text: String) {
 #[inline]
 #[cfg(not(any(target_os = "ios")))]
 pub fn switch_permission(id: i32, name: String, enabled: bool) {
+    // The whitelist is checked here and not only where the local API parses a request: the
+    // session panel and the Flutter front end call this straight, and a permission that is
+    // not offered has to be refused whichever door it comes in by.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if permission_switch_available(&name).is_err() {
+        log::warn!(
+            "ignored switch_permission for a permission this client does not offer, conn_id={}, permission={}, enabled={}",
+            id,
+            name,
+            enabled
+        );
+        return;
+    }
     #[cfg(target_os = "android")]
     let is_keyboard_permission = name == "keyboard";
     #[cfg(not(target_os = "android"))]
@@ -692,21 +705,17 @@ pub fn switch_back(id: i32) {
 ///
 /// Kept as a list rather than passed through: `switch_permission` hands whatever name
 /// it is given to the server, and a server is the wrong place to find out that a third
-/// party spelled one wrong. The two platform-bound switches are refused where the
-/// panel would not have drawn them either.
+/// party spelled one wrong.
+///
+/// These four are the A-class channels of the client integration design (§7.1): the ones
+/// that stay shut until the local user opens them for a session. The rest are not
+/// switchable at all and have no name here - remote restart, blocking input and privacy
+/// mode are not offered at all, and recording is part of the session rather than a
+/// permission anybody gets to toggle.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn permission_switch_available(name: &str) -> Result<(), String> {
     match name {
-        "keyboard" | "clipboard" | "audio" | "file" | "restart" | "recording" => Ok(()),
-        "block_input" if cfg!(target_os = "windows") => Ok(()),
-        "block_input" => Err("blocking user input is only available on Windows".to_owned()),
-        "privacy_mode" => {
-            if crate::privacy_mode::get_supported_privacy_mode_impl().is_empty() {
-                Err("privacy mode is not available on this platform".to_owned())
-            } else {
-                Ok(())
-            }
-        }
+        "keyboard" | "clipboard" | "audio" | "file" => Ok(()),
         other => Err(format!("unknown permission \"{}\"", other)),
     }
 }
