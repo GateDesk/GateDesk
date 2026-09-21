@@ -136,6 +136,10 @@ pub struct Client {
     /// `get_clients_state()` - would otherwise draw no prompt for a request the server is
     /// already counting down.
     pub pending_control: bool,
+    /// Name of the permission the peer asked for while a prompt is outstanding; empty for
+    /// the keyboard-and-mouse request. Carried next to `pending_control` for the same
+    /// reason: a window that opens after the request was raised still has to draw it.
+    pub pending_permission: String,
     pub is_file_transfer: bool,
     pub is_view_camera: bool,
     pub is_terminal: bool,
@@ -196,7 +200,7 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     /// Tell the CM window whether a control request from this peer is waiting for
     /// the local user to approve it.
-    fn update_control_request(&self, id: i32, pending: bool);
+    fn update_control_request(&self, id: i32, pending: bool, permission: String);
 
     fn change_theme(&self, dark: String);
 
@@ -251,6 +255,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             authorized,
             disconnected: false,
             pending_control: false,
+            pending_permission: String::new(),
             is_file_transfer,
             is_view_camera,
             is_terminal,
@@ -339,13 +344,12 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
     /// opens late rebuilds itself from, and it has to agree with the prompt the event asks
     /// for.
     #[cfg(not(target_os = "ios"))]
-    fn update_control_request(&self, id: i32, pending: bool) {
-        CLIENTS
-            .write()
-            .unwrap()
-            .get_mut(&id)
-            .map(|c| c.pending_control = pending);
-        self.ui_handler.update_control_request(id, pending);
+    fn update_control_request(&self, id: i32, pending: bool, permission: String) {
+        CLIENTS.write().unwrap().get_mut(&id).map(|c| {
+            c.pending_control = pending;
+            c.pending_permission = permission.clone();
+        });
+        self.ui_handler.update_control_request(id, pending, permission);
     }
 
     /// Carry out one call made over the local HTTP API, or say why it cannot be.
@@ -483,24 +487,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
     /// reports either way.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn set_permission_locally(&self, id: i32, name: &str, enabled: bool) {
-        let client = {
-            let mut clients = CLIENTS.write().unwrap();
-            clients.get_mut(&id).map(|c| {
-                match name {
-                    "keyboard" => c.keyboard = enabled,
-                    "clipboard" => c.clipboard = enabled,
-                    "audio" => c.audio = enabled,
-                    "file" => c.file = enabled,
-                    "restart" => c.restart = enabled,
-                    "recording" => c.recording = enabled,
-                    "block_input" => c.block_input = enabled,
-                    "privacy_mode" => c.privacy_mode = enabled,
-                    _ => {}
-                }
-                c.clone()
-            })
-        };
-        if let Some(client) = client {
+        if let Some(client) = record_permission(id, name, enabled) {
             self.ui_handler.add_connection(&client);
         }
     }
@@ -607,11 +594,7 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
     let is_keyboard_permission = name == "keyboard";
     #[cfg(not(target_os = "android"))]
     let is_keyboard_permission = false;
-    if !option2bool(
-        OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW,
-        &crate::get_builtin_option(OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW),
-    ) && !is_keyboard_permission
-    {
+    if !permission_change_allowed() && !is_keyboard_permission {
         log::info!(
             "blocked cm switch_permission by policy, conn_id={}, permission={}, enabled={}",
             id,
@@ -625,14 +608,72 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
     };
 }
 
+/// Whether policy lets permissions be switched at all right now.
+///
+/// A locked-down deployment sets `enable-perm-change-in-accept-window = N`, and then
+/// everything the panel draws a switch for is refused. Read here as well as by
+/// `respond_control_request`, so that answering a request in such a deployment records
+/// nothing rather than reporting a switch that never went out.
+fn permission_change_allowed() -> bool {
+    option2bool(
+        OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW,
+        &crate::get_builtin_option(OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW),
+    )
+}
+
 /// Send the local user's answer to the peer's control request back to the
 /// connection that raised it.
+///
+/// A named request - one of the A-class channels - is turned into the permission itself
+/// here, with the very call the panel's own switch makes. The connection only ever told
+/// this side that somebody asked; switching the permission is the same job either way,
+/// and doing it here keeps the connection from having to know how to switch one.
 #[inline]
 #[cfg(not(any(target_os = "ios")))]
 pub fn respond_control_request(id: i32, accepted: bool) {
+    let permission = CLIENTS
+        .read()
+        .unwrap()
+        .get(&id)
+        .map(|c| c.pending_permission.clone())
+        .unwrap_or_default();
+    if accepted && !permission.is_empty() && permission_change_allowed() {
+        // Recorded as well so that `GET /sessions` reports it and a window that opens late
+        // draws it; the window the answer came from moves its own switch, see
+        // `set_permission_locally`. Nothing is recorded when policy refuses, because then
+        // the switch below is dropped and nothing has really changed.
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        record_permission(id, &permission, true);
+        switch_permission(id, permission, true);
+    }
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
         allow_err!(client.tx.send(Data::ControlResponse { accepted }));
     };
+}
+
+/// Write a permission into the state this process reports, and hand the client back so
+/// the caller can redraw from it.
+///
+/// The panel updates itself optimistically when a person clicks a switch, so a change
+/// arriving any other way - the local API, or a named request somebody just allowed -
+/// has to be written down here or the switch would sit at its old position until the
+/// next thing the server happens to send.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn record_permission(id: i32, name: &str, enabled: bool) -> Option<Client> {
+    CLIENTS.write().unwrap().get_mut(&id).map(|c| {
+        match name {
+            "keyboard" => c.keyboard = enabled,
+            "clipboard" => c.clipboard = enabled,
+            "audio" => c.audio = enabled,
+            "file" => c.file = enabled,
+            "restart" => c.restart = enabled,
+            "recording" => c.recording = enabled,
+            "block_input" => c.block_input = enabled,
+            "privacy_mode" => c.privacy_mode = enabled,
+            _ => {}
+        }
+        c.clone()
+    })
 }
 
 /// Peer id of a live connection, for prompts that have to name who is asking.
@@ -822,8 +863,12 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
                                 }
-                                Data::ControlRequest { pending } => {
-                                    self.cm.update_control_request(self.conn_id, pending);
+                                Data::ControlRequest { pending, permission } => {
+                                    self.cm.update_control_request(
+                                        self.conn_id,
+                                        pending,
+                                        permission,
+                                    );
                                 }
                                 Data::SwitchPermission { name, enabled } => {
                                     // Keep this branch scoped to privacy mode rollback.

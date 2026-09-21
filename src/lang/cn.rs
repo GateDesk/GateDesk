@@ -397,6 +397,14 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("One-time password length", "一次性密码长度"),
         ("Request access to your device", "请求访问你的设备"),
         ("A remote user requests to control your mouse and keyboard", "远程用户请求控制你的鼠标和键盘"),
+        ("A remote user requests to enable %1", "远程用户请求开启%1"),
+        // The nouns that go inside the sentence above. They are not the switch labels
+        // ("Enable clipboard"): those are sentences of their own and would read wrong
+        // after "request to enable".
+        ("keyboard/mouse", "键盘/鼠标"),
+        ("clipboard", "剪贴板"),
+        ("audio", "音频"),
+        ("file copy and paste", "文件复制粘贴"),
         ("Hide connection management window", "隐藏连接管理窗口"),
         ("hide_cm_tip", "在只允许密码连接并且只用固定密码的情况下才允许隐藏"),
         ("wayland_experiment_tip", "Wayland 支持处于实验阶段，如果你需要使用无人值守访问，请使用 X11。"),

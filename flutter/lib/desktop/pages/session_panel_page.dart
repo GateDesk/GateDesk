@@ -505,6 +505,28 @@ class _ControlRequest extends StatefulWidget {
   State<_ControlRequest> createState() => _ControlRequestState();
 }
 
+/// The noun the prompt puts inside its sentence for a permission a peer asked for.
+///
+/// Not the switch labels this file draws further down ("Enable clipboard"): those are sentences
+/// of their own and read wrong after "requests to enable". The same table is in `cm.rs`, `cm.tis`
+/// and `panel.tis` - one per front end, since a translated string only exists where it is drawn.
+String _permissionLabel(String name) {
+  switch (name) {
+    case 'keyboard':
+      return 'keyboard/mouse';
+    case 'clipboard':
+      return 'clipboard';
+    case 'audio':
+      return 'audio';
+    case 'file':
+      return 'file copy and paste';
+    default:
+      // A name with no label is shown as it came: a bare word says more about what is being
+      // asked for than a sentence that leaves it out.
+      return name;
+  }
+}
+
 class _ControlRequestState extends State<_ControlRequest> {
   Timer? _ticker;
 
@@ -542,9 +564,15 @@ class _ControlRequestState extends State<_ControlRequest> {
     // The button that ends the wait is the one the peer wants pressed, so it is drawn on the
     // right; the refusal keeps the left, where the outline weight stops it from reading as the
     // default. Same order as the connection manager's own prompt.
+    // The peer asks for one thing at a time: an empty name is the mouse and keyboard, which is
+    // the request that was here before a peer could ask for anything by name.
+    final permission = widget.client.pendingPermission;
     return _RequestBox(
       icon: Icons.pan_tool_alt_rounded,
-      title: translate('A remote user requests to control your mouse and keyboard'),
+      title: permission.isEmpty
+          ? translate('A remote user requests to control your mouse and keyboard')
+          : translate('A remote user requests to enable %1')
+              .replaceAll('%1', translate(_permissionLabel(permission))),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [

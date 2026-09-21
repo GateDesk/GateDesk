@@ -2201,6 +2201,12 @@ impl LoginConfigHandler {
             // this through its connection manager; until it does, the session stays
             // view-only on its side. Nothing is persisted: the grant is per session.
             option.disable_keyboard = BoolOption::No.into();
+        } else if let Some(permission) = name.strip_prefix("request-permission:") {
+            // Ask the peer to open one of the A-class channels for this session:
+            // clipboard, audio or file. Same shape as `request-control` above - an ask,
+            // not a setting, and the peer's local user is the one who answers it in its
+            // own panel, so nothing is persisted and nothing changes here.
+            option.request_permission = permission.to_owned();
         } else if name == "show-my-cursor" {
             config.show_my_cursor.v = !config.show_my_cursor.v;
             option.show_my_cursor = if config.show_my_cursor.v {
@@ -2229,7 +2235,10 @@ impl LoginConfigHandler {
             crate::clipboard::try_empty_clipboard_files(crate::clipboard::ClipboardSide::Client, 0);
         }
 
-        if !name.contains("block-input") && name != "request-control" {
+        if !name.contains("block-input")
+            && name != "request-control"
+            && !name.starts_with("request-permission:")
+        {
             self.save_config(config);
         }
         let mut misc = Misc::new();

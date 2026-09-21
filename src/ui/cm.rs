@@ -16,6 +16,25 @@ pub struct SciterHandler {
     pub element: Arc<Mutex<Option<Element>>>,
 }
 
+/// The noun the prompt puts inside its sentence for a permission a peer asked for.
+///
+/// Not the switch labels the panel draws ("Enable clipboard"): those are sentences of
+/// their own and read wrong after "requests to enable". The same table is in the hide-cm
+/// dialog above, `cm.tis` and `panel.tis` - one per front end, since a translated string
+/// only exists where it is drawn.
+#[cfg(windows)]
+fn permission_label(name: &str) -> &str {
+    match name {
+        "keyboard" => "keyboard/mouse",
+        "clipboard" => "clipboard",
+        "audio" => "audio",
+        "file" => "file copy and paste",
+        // A name with no label is shown as it came: a bare word says more about what is
+        // being asked for than a sentence that leaves it out.
+        other => other,
+    }
+}
+
 impl InvokeUiCM for SciterHandler {
     fn add_connection(&self, client: &crate::ui_cm_interface::Client) {
         self.call(
@@ -53,7 +72,7 @@ impl InvokeUiCM for SciterHandler {
         self.call("newMessage", &make_args!(id, text));
     }
 
-    fn update_control_request(&self, id: i32, pending: bool) {
+    fn update_control_request(&self, id: i32, pending: bool, permission: String) {
         // With `hide-cm` the connection manager window is never shown, so a prompt
         // drawn inside it would be invisible and the session would stay view-only
         // with nobody able to grant control. Ask in a standalone topmost dialog
@@ -64,9 +83,17 @@ impl InvokeUiCM for SciterHandler {
         if pending && *HIDE_CM.lock().unwrap() {
             std::thread::spawn(move || {
                 let peer_id = crate::ui_cm_interface::get_client_peer_id(id);
-                let mut text = crate::client::translate(
-                    "A remote user requests to control your mouse and keyboard".to_owned(),
-                );
+                // A named request is one of the A-class channels; an empty one is the
+                // keyboard-and-mouse request that has always been here.
+                let mut text = if permission.is_empty() {
+                    crate::client::translate(
+                        "A remote user requests to control your mouse and keyboard".to_owned(),
+                    )
+                } else {
+                    let label = crate::client::translate(permission_label(&permission).to_owned());
+                    crate::client::translate("A remote user requests to enable %1".to_owned())
+                        .replace("%1", &label)
+                };
                 if !peer_id.is_empty() {
                     text = format!("{}\n\n({})", text, peer_id);
                 }
@@ -75,7 +102,10 @@ impl InvokeUiCM for SciterHandler {
             });
             return;
         }
-        self.call("updateControlRequest", &make_args!(id, pending));
+        self.call(
+            "updateControlRequest",
+            &make_args!(id, pending, permission),
+        );
     }
 
     fn change_theme(&self, dark: String) {

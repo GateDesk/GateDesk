@@ -416,12 +416,16 @@ pub enum Data {
     ControlRequest {
         /// `true` while a prompt is outstanding.
         pending: bool,
+        /// Which permission the peer asked for; empty for the keyboard and mouse request
+        /// that has always been here. A named one is one of the A-class channels -
+        /// clipboard, audio, file - and the local user answers it the same way.
+        permission: String,
     },
     /// The local user's answer to a pending `ControlRequest`, sent CM -> connection.
     ControlResponse {
         accepted: bool,
     },
-    /// A local API client asking this session to ask its peer for control.
+    /// A local API client asking this session to ask its peer for one thing.
     ///
     /// The peer connection lives in the session process while the HTTP API on
     /// 127.0.0.1:21120 runs in the `--server` process, so the two talk over IPC. The
@@ -429,6 +433,10 @@ pub enum Data {
     /// run several sessions at once and each one owns a different peer.
     RequestControl {
         peer_id: String,
+        /// What is being asked for: an A-class channel name - `clipboard`, `audio`,
+        /// `file` - or empty for the mouse and keyboard, which is the request that was
+        /// here first. Both are only ever asks; the peer's local user answers.
+        permission: String,
     },
     /// A local API client asking the connection manager to act on a session.
     ///
@@ -1508,12 +1516,16 @@ pub const POSTFIX_CONTROL: &str = "_control_";
 /// - the session's own "Request control" toggle - does the work. The reply is only an
 /// ack, so a caller can tell "the session took it" from "no such session".
 ///
+/// `on_request` is handed the permission name that was asked for, empty for the mouse
+/// and keyboard. The name is passed on rather than interpreted here: which option a
+/// name turns into is the session's business, and this module has no session.
+///
 /// Blocks; callers run it on its own thread. Returns instead of panicking when the name
 /// is already taken, so a reconnecting session cannot wedge the process it runs in.
 #[tokio::main(flavor = "current_thread")]
 pub async fn listen_control_requests(
     peer_id: String,
-    on_request: std::sync::Arc<dyn Fn() + Send + Sync>,
+    on_request: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
 ) {
     let postfix = format!("{}{}", POSTFIX_CONTROL, peer_id);
     let mut incoming = match new_listener(&postfix).await {
@@ -1532,14 +1544,16 @@ pub async fn listen_control_requests(
         let expected = peer_id.clone();
         tokio::spawn(async move {
             let mut conn = Connection::new(stream);
-            if let Some(Ok(Some(Data::RequestControl { peer_id: asked }))) =
-                conn.next_timeout2(1000).await
+            if let Some(Ok(Some(Data::RequestControl {
+                peer_id: asked,
+                permission,
+            }))) = conn.next_timeout2(1000).await
             {
                 // The name already identifies the session, but check anyway: a stale
                 // socket left by a previous session must not be made to act for a peer it
                 // never had.
                 if asked == expected {
-                    on_request();
+                    on_request(&permission);
                     let _ = conn.send(&Data::Test).await;
                 }
             }

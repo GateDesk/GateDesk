@@ -16,6 +16,25 @@ function setWindowState(state) {
     view.windowState = state;
 }
 
+// The things a peer may ask for by name apart from the keyboard, as the noun that goes
+// inside the sentence the prompt draws - see the same table in panel.tis.
+var permission_labels = {
+    keyboard: "keyboard/mouse",
+    clipboard: "clipboard",
+    audio: "audio",
+    file: "file copy and paste"
+};
+
+// What the outstanding request is for. Empty means the keyboard and mouse, which is the
+// request that was here before a peer could ask for anything by name.
+function request_title(c) {
+    if (!c.pending_permission) {
+        return translate('A remote user requests to control your mouse and keyboard');
+    }
+    return translate('A remote user requests to enable %1').replace('%1',
+        translate(permission_labels[c.pending_permission] || c.pending_permission));
+}
+
 class Body: Reactor.Component
 {
     this var cur = 0;
@@ -85,7 +104,7 @@ class Body: Reactor.Component
                 {c.port_forward ? <div>Port Forwarding: {c.port_forward}</div> : ""}
                 <div style="size:*"/>
                 {connected && c.pending_control ? <div .control-request>
-                    <div>{translate('A remote user requests to control your mouse and keyboard')}</div>
+                    <div>{request_title(c)}</div>
                     <div .inner_buttons>
                         <button #allow_control .control .button>{translate('Allow')}</button>
                         <button #deny_control .control .outline>{translate('Deny')}</button>
@@ -255,7 +274,15 @@ class Body: Reactor.Component
         var { cid, connection } = this;
         checkClickTime(function() {
             connection.pending_control = false;
-            connection.keyboard = true;
+            // A named request is a permission, so its switch moves as well; an unnamed
+            // one is the keyboard, which is what the prompt used to be about. The server
+            // does the same thing on the strength of the answer, this is only so the row
+            // does not sit at its old position until the next refresh.
+            if (connection.pending_permission) {
+                connection[connection.pending_permission] = true;
+            } else {
+                connection.keyboard = true;
+            }
             body.update();
             handler.respond_control_request(cid, true);
         });
@@ -443,7 +470,7 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         keyboard: keyboard, clipboard: clipboard, msgs: [], unreaded: 0,
         audio: audio, file: file, restart: restart, recording: recording,
         block_input:block_input, privacy_mode:privacy_mode,
-        pending_control: false,
+        pending_control: false, pending_permission: "",
         disconnected: false
     };
     if (idx < 0) {
@@ -463,9 +490,13 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
     }
 }
 
-handler.updateControlRequest = function(id, pending) {
+handler.updateControlRequest = function(id, pending, permission) {
     connections.map(function(c) {
-        if (c.id == id) c.pending_control = pending;
+        if (c.id == id) {
+            c.pending_control = pending;
+            // Which permission is being asked for, empty for the keyboard and mouse.
+            c.pending_permission = permission;
+        }
     });
     update();
 }

@@ -92,13 +92,33 @@ function render_permissions(c) {
     </div>;
 }
 
+// The things a peer may ask for by name apart from the keyboard, as the noun that goes
+// inside the sentence the prompt draws. The switch labels below ("Enable clipboard") are
+// sentences of their own and would read wrong after "requests to enable".
+var permission_labels = {
+    keyboard: "keyboard/mouse",
+    clipboard: "clipboard",
+    audio: "audio",
+    file: "file copy and paste"
+};
+
+// What the outstanding request is for. Empty means the keyboard and mouse, which is the
+// request that was here before a peer could ask for anything by name.
+function request_title(c) {
+    if (!c.pending_permission) {
+        return translate('A remote user requests to control your mouse and keyboard');
+    }
+    return translate('A remote user requests to enable %1').replace('%1',
+        translate(permission_labels[c.pending_permission] || c.pending_permission));
+}
+
 function render_request(c) {
     var left = seconds_left(c);
     var pct = left * 100 / CONTROL_TIMEOUT_SECONDS;
     return <div .request>
         <div .request-head>
             <div .request-icon>{"!"}</div>
-            <div .request-title>{translate('A remote user requests to control your mouse and keyboard')}</div>
+            <div .request-title>{request_title(c)}</div>
         </div>
         <div .progress><div .progress-bar style={"width: " + pct + "%;"} /></div>
         <div .request-note>{translate('Timeout') + ": " + left + "s"}</div>
@@ -176,6 +196,10 @@ class Body: Reactor.Component {
         if (!c) return;
         checkClickTimeFor(c.id, function() {
             c.pending_control = false;
+            // A named request is a permission, so its switch moves as well. The server
+            // does the same thing on the strength of the answer, this is only so the row
+            // does not sit at its old position until the next refresh.
+            if (c.pending_permission) c[c.pending_permission] = true;
             body.update();
             handler.respond_control_request(c.id, true);
         });
@@ -274,7 +298,8 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         name: name, avatar: avatar, authorized: authorized,
         keyboard: keyboard, clipboard: clipboard, audio: audio, file: file,
         restart: restart, recording: recording, block_input: block_input,
-        privacy_mode: privacy_mode, pending_control: false, control_deadline: 0,
+        privacy_mode: privacy_mode, pending_control: false, pending_permission: "",
+        control_deadline: 0,
         disconnected: false
     };
     connections.push(conn);
@@ -293,14 +318,18 @@ handler.removeConnection = function(id, close) {
     } else {
         connections[i].disconnected = true;
         connections[i].pending_control = false;
+        connections[i].pending_permission = "";
     }
     body.update();
 }
 
-handler.updateControlRequest = function(id, pending) {
+handler.updateControlRequest = function(id, pending, permission) {
     var c = find_connection(id);
     if (!c) return;
     c.pending_control = pending;
+    // Which permission is being asked for, empty for the keyboard and mouse. Kept on the
+    // connection because the prompt is drawn from it and closes over nothing.
+    c.pending_permission = permission;
     // Start the countdown when the request arrives; it is only a display of the server's own
     // deadline, so both sides can drift by a second without the outcome changing.
     c.control_deadline = pending ? getTime() + CONTROL_TIMEOUT_SECONDS * 1000 : 0;

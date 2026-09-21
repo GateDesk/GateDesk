@@ -612,31 +612,74 @@ fn handle_request_control(mut request: Request) {
     let Some(id) = json_field(&body, "id") else {
         return respond(request, 400, error_body("id is required"));
     };
-    // The id is appended to an IPC name, so keep path separators and control
-    // characters out of it: on Unix that name is a path, and on Windows a backslash
-    // starts a new pipe level.
-    if id.is_empty()
-        || id.len() > 128
-        || id
-            .chars()
-            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | ':'))
-    {
+    if !valid_peer_id(&id) {
         return respond(request, 400, error_body("invalid id"));
     }
-    match ask_session_for_control(&id) {
+    match ask_session_for_control(&id, "") {
         Ok(()) => respond(request, 200, "{\"ok\":true}".to_owned()),
         Err((status, reason)) => respond(request, status, error_body(&reason)),
     }
 }
 
+/// `POST /request-permission` `{"id":"<peer id>","name":"clipboard"}` - ask a peer to
+/// open one of its A-class channels.
+///
+/// The counterpart of `/permission`, the way `/request-control` is the counterpart of
+/// `/control`: `/permission` is for the machine being controlled and switches one of its
+/// permissions here, while this one is for the operator and asks the peer to do it
+/// there. The peer's local user answers it in their own panel, and the answer comes back
+/// as the peer simply starting to use the channel - there is no result to wait for, which
+/// is why the ack only says the session took the request.
+///
+/// The name is one of the A-class channels: `clipboard`, `audio`, `file`. Mouse and
+/// keyboard is `/request-control` and has no name here.
+fn handle_request_permission(mut request: Request) {
+    let body = read_body(&mut request, MAX_BODY_BYTES);
+    let Some(id) = json_field(&body, "id") else {
+        return respond(request, 400, error_body("id is required"));
+    };
+    if !valid_peer_id(&id) {
+        return respond(request, 400, error_body("invalid id"));
+    }
+    let Some(name) = json_field(&body, "name") else {
+        return respond(request, 400, error_body("name is required"));
+    };
+    // Refused here rather than at the peer: a name the peer does not know is a caller
+    // mistake, and sending it would only buy a prompt the local user cannot act on. The
+    // list is `Connection::is_requestable_permission`'s, from the other end.
+    if !matches!(name.as_str(), "clipboard" | "audio" | "file") {
+        return respond(request, 400, error_body("unknown permission"));
+    }
+    match ask_session_for_control(&id, &name) {
+        Ok(()) => respond(request, 200, "{\"ok\":true}".to_owned()),
+        Err((status, reason)) => respond(request, status, error_body(&reason)),
+    }
+}
+
+/// Whether a caller-supplied peer id is safe to put into an IPC name.
+///
+/// On Unix that name is a path and on Windows a backslash starts a new pipe level, so
+/// path separators and control characters are kept out; the length cap is the same one
+/// the peer id format allows.
+fn valid_peer_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | ':'))
+}
+
 /// Hand the request to the session that owns `peer_id`.
+///
+/// `permission` is empty for the mouse and keyboard request and one of the A-class
+/// channels otherwise; the session turns it into its own toggle.
 ///
 /// A 503 means no session process is listening for that peer - nothing was opened, or
 /// the session has already gone - which the caller may have to tell apart from a peer
 /// that simply has not answered its prompt yet. That answer never reaches here: the
 /// ack only says the session ran its toggle.
 #[tokio::main(flavor = "current_thread")]
-async fn ask_session_for_control(peer_id: &str) -> Result<(), (u16, String)> {
+async fn ask_session_for_control(peer_id: &str, permission: &str) -> Result<(), (u16, String)> {
     const ACK_TIMEOUT_MS: u64 = 2000;
     let postfix = format!("{}{}", ipc::POSTFIX_CONTROL, peer_id);
     let mut conn = ipc::connect(1000, &postfix)
@@ -644,6 +687,7 @@ async fn ask_session_for_control(peer_id: &str) -> Result<(), (u16, String)> {
         .map_err(|e| (503, format!("no session for {} is listening: {}", peer_id, e)))?;
     conn.send(&ipc::Data::RequestControl {
         peer_id: peer_id.to_owned(),
+        permission: permission.to_owned(),
     })
     .await
     .map_err(|e| (500, format!("cannot reach the session: {}", e)))?;
@@ -852,6 +896,9 @@ fn handle(request: Request) {
         }
         (&Method::Post, "/request-control") => {
             handle_request_control(request);
+        }
+        (&Method::Post, "/request-permission") => {
+            handle_request_permission(request);
         }
         (&Method::Post, "/password") => {
             handle_password(request);

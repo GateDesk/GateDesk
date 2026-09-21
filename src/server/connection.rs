@@ -302,6 +302,9 @@ pub struct Connection {
     /// answer it in the connection manager. Stops the prompt being raised again
     /// on every option message the peer sends.
     control_requested: bool,
+    /// Which permission the peer asked for while that request is outstanding; empty for the
+    /// keyboard-and-mouse request, which is the one that has always been here.
+    control_request_permission: String,
     /// When the outstanding control request expires.
     ///
     /// Answering a request is a security decision, so silence must not read as consent: a
@@ -525,6 +528,7 @@ impl Connection {
             tx_input,
             control_authorized: false,
             control_requested: false,
+            control_request_permission: String::new(),
             control_request_deadline: None,
             video_ack_required: false,
             server_audit_conn: "".to_owned(),
@@ -1120,13 +1124,14 @@ impl Connection {
                     // the decision came from the timeout rather than from a person.
                     if let Some(deadline) = conn.control_request_deadline {
                         if Instant::now() >= deadline {
+                            let asked = conn.control_request_permission.clone();
                             conn.resolve_control_request(false).await;
                             crate::audit::record(
                                 "control.timeout",
                                 "customer",
                                 conn.lr.session_id,
                                 "timeout",
-                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                                serde_json::json!({"peer_id": conn.lr.my_id, "permission": asked}),
                             );
                         }
                     }
@@ -2282,6 +2287,18 @@ impl Connection {
     async fn resolve_control_request(&mut self, accepted: bool) {
         self.control_requested = false;
         self.control_request_deadline = None;
+        let asked = std::mem::take(&mut self.control_request_permission);
+        if !asked.is_empty() {
+            // A named permission. The CM switched it on the moment the local user accepted
+            // - that is `ui_cm_interface::respond_control_request`, the same call the
+            // panel's own switch makes - so the only thing left here is to clear the prompt.
+            // A refusal switched nothing, and needs nothing either.
+            self.send_to_cm(ipc::Data::ControlRequest {
+                pending: false,
+                permission: String::new(),
+            });
+            return;
+        }
         self.control_authorized = accepted;
         if accepted {
             self.disable_keyboard = false;
@@ -2297,7 +2314,19 @@ impl Connection {
                 );
             }
         }
-        self.send_to_cm(ipc::Data::ControlRequest { pending: false });
+        self.send_to_cm(ipc::Data::ControlRequest {
+            pending: false,
+            permission: String::new(),
+        });
+    }
+
+    /// The permissions a peer may ask for by name.
+    ///
+    /// Keyboard and mouse is deliberately not one of them: it has its own gate,
+    /// `control_authorized`, and granting the permission alone would leave the session
+    /// looking allowed while still refusing every keystroke.
+    fn is_requestable_permission(name: &str) -> bool {
+        matches!(name, "clipboard" | "audio" | "file")
     }
 
     fn clipboard_enabled(&self) -> bool {
@@ -4939,7 +4968,10 @@ impl Connection {
                         self.control_requested = true;
                         self.control_request_deadline =
                             Some(Instant::now() + Self::CONTROL_REQUEST_TIMEOUT);
-                        self.send_to_cm(ipc::Data::ControlRequest { pending: true });
+                        self.send_to_cm(ipc::Data::ControlRequest {
+                            pending: true,
+                            permission: String::new(),
+                        });
                     }
                 } else {
                     self.disable_keyboard = q == BoolOption::Yes;
@@ -4962,6 +4994,29 @@ impl Connection {
                         self.peer_keyboard_enabled() || self.show_remote_cursor,
                     );
                 }
+            }
+        }
+        // A peer asking for one named permission - one of the A-class channels. Like the
+        // keyboard request above it is put to the local user rather than granted here: the
+        // peer asking is not the local user answering. Keyboard and mouse does not come
+        // through here, it is `disable_keyboard` above with its own gate.
+        if !o.request_permission.is_empty() {
+            let name = o.request_permission.to_owned();
+            if !Self::is_requestable_permission(&name) {
+                // A name nobody could act on. Refused here rather than raised: a prompt the
+                // local user has no way to answer is worse than no prompt. The caller is
+                // turned away by the local API before it gets this far, so this is for the
+                // log.
+                log::warn!("ignored a peer request for permission {}", name);
+            } else if !self.control_requested {
+                self.control_requested = true;
+                self.control_request_permission = name.clone();
+                self.control_request_deadline =
+                    Some(Instant::now() + Self::CONTROL_REQUEST_TIMEOUT);
+                self.send_to_cm(ipc::Data::ControlRequest {
+                    pending: true,
+                    permission: name,
+                });
             }
         }
         // For compatibility with old versions ( < 1.2.4 ).

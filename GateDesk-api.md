@@ -19,7 +19,7 @@ GateDesk 客户端进程内嵌一个仅限本机访问的 HTTP 服务，供**本
 
 | 类别 | 本机角色 | 端点 | 状态存放在 |
 |------|---------|------|-----------|
-| 主动连接 | 控制端 | `/id`、`/connect`、`/disconnect`、`/request-control`、`/password`、`/voice`、`/status` | 本进程（含本 API 启动的会话窗口；请求控制经进程内通道交给会话进程，§6.9） |
+| 主动连接 | 控制端 | `/id`、`/connect`、`/disconnect`、`/request-control`、`/request-permission`、`/password`、`/voice`、`/status` | 本进程（含本 API 启动的会话窗口；两种请求经进程内通道交给会话进程，§6.9 / §6.10） |
 | 会话与批准 | **被控端** | `/sessions`、`/approve`、`/control`、`/permission`、`/terminate`、`/dismiss` | 连接管理器进程（§6.7）；本 API 通过进程内通道与其通信 |
 
 ## 2. 安全要求（设计硬约束）
@@ -399,8 +399,8 @@ curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"n
 **边界**
 
 - 只有这四个名字。远程重启、阻止用户输入、隐私模式本客户端不提供；录制会话随会话默认开启，不是可切换项。传其他名字一律返回 400 `unknown permission`。
-- 这四项在会话建立时都是关闭的，对端的权限请求不能代替本机用户打开它们：本接口和受控端会话面板是仅有的两个开启方式，且走的是同一批动作。
-- 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，除 `keyboard` 外一律拒绝，返回 409。
+- 这四项在会话建立时都是关闭的。对端可以开口要，但要不到：请求只是把「有人想开」摆到本机用户眼前（§6.10），**答案始终由本机用户给**。本接口和受控端会话面板是仅有的两个决定入口，且走的是同一批动作。
+- 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，除 `keyboard` 外一律拒绝，返回 409；这一条同样管着应答许可请求（§6.10），即锁定后对端问了也开不了。
 - 打开 `keyboard` **不等于**授权控制：控制授权是独立闸门（§6.7.3），两者都满足才真正放开输入。
 
 **审计**：`permission.change`（见 §6.8）。
@@ -502,6 +502,47 @@ curl -X POST "http://127.0.0.1:21120/request-control?token=<token>" -d "{\"id\":
 
 **审计**：对端的允许 / 拒绝 / 超时分别记为 `control.approve` / `control.deny` / `control.timeout`（§6.8），记在**被控端**。
 
+### 6.10 请求对端开启某个权限（控制端，v1.11）
+
+```
+POST /request-permission
+```
+
+向一个**已经打开**的会话的对端要一项 A 类权限。这是 §6.7.4 的对侧：本机主动开口，对端自己弹确认界面应答。
+
+| 参数 | 必填 | 类型 | 说明 |
+|------|------|------|------|
+| id | 是 | string | 对端设备 ID，必须是本机已由 `/connect` 打开的会话 |
+| name | 是 | string | `clipboard` / `audio` / `file` |
+
+**请求示例**
+
+```powershell
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"123456789\",\"name\":\"clipboard\"}"
+```
+
+**成功响应（200）**
+
+```json
+{"ok":true}
+```
+
+**语义**：与「请求键鼠控制」（§6.9）同构，只是要的不是键鼠而是四个 A 类通道之一。请求落在会话的 `OptionMessage.request_permission` 上（协议里新加的字段，不是设置项：`disable_*` 说的是「我要关」，这个说的是「可以吗」），对端收到后在自己那台机器的 GateDesk 上弹一个确认，**答案由对端本机用户给**：允许就是对端自己调一次开关（与 §6.7.4 同一批动作），拒绝则什么也不变。
+
+**没有回调、没有结果推送**：本 API 是轮询式的（§8.1），200 只说「会话已受理」。结果只能从会话窗口侧看出——对端允许后通道会真的打开，本机远程窗口就能用到剪贴板 / 声音 / 文件；对端拒绝或无人应答则一直不可用。**要判结果就不要拿这个接口判**，它在语义上就是「问过了」。
+
+**注意**：`name` 里没有 `keyboard`。键鼠控制是另一道闸门，用 `/request-control`；这里传 `keyboard` 返回 400 `unknown permission`。
+
+**错误**
+
+| HTTP | 触发条件 |
+|------|---------|
+| 400 | `id` 缺失、为空或超长；`name` 缺失或不在白名单内 |
+| 503 | 找不到该对端的会话进程（没有开过会话，或会话已退出） |
+| 504 | 会话进程在 2 秒内未回应 |
+
+**审计**：请求本身不单独记事件。对端的允许与超时分别记为 `permission.change` 与 `control.timeout`（§6.8，`extra.permission` 里带着权限名），记在**被控端**。
+
 ## 7. 错误码
 
 | HTTP | 触发条件 |
@@ -516,7 +557,7 @@ curl -X POST "http://127.0.0.1:21120/request-control?token=<token>" -d "{\"id\":
 | 409 | 会话当前状态与该动作不符：应答一个并不存在的控制请求、放行一个已经放行的对端、结束一个已经结束的会话、在权限被运维锁定时改权限（v1.8） |
 | 413 | 请求体 `Content-Length` 超过 1024 字节（v1.7） |
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
-| 503 | 本机当前没有连接管理器在监听（即无会话、无会话面板窗口），会话类接口无法执行（v1.8）；或 `/request-control` 找不到该对端的会话进程（v1.9） |
+| 503 | 本机当前没有连接管理器在监听（即无会话、无会话面板窗口），会话类接口无法执行（v1.8）；或 `/request-control` / `/request-permission` 找不到该对端的会话进程（v1.9 / v1.11） |
 | 504 | 连接管理器或会话进程在 2 秒内未回应（v1.8 / v1.9） |
 
 **401 响应体区分**
@@ -582,6 +623,11 @@ curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":<id>,\"a
 curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
 # 开关权限 → 200，面板上对应开关同步变化
 curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"enabled\":true}"
+# 请求对端开启一项 A 类权限（v1.11，控制端；<ID> 是本机已 /connect 的对端设备 ID）
+# → 200 只表示会话已受理；对端 GateDesk 会弹确认，不点则什么也不变
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"<ID>\",\"name\":\"clipboard\"}"
+# name 白名单之外（含 keyboard，那是 /request-control 的事）→ 400
+curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"<ID>\",\"name\":\"keyboard\"}"
 # 结束会话 → 200，对端断开且允许重连
 curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d "{\"id\":<id>}"
 # 清理已结束的会话 → 200
@@ -594,6 +640,7 @@ curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-21 | 1.11 | 新增控制端端点 `POST /request-permission`（§6.10）：向已打开的会话请求对端开启一项 A 类权限（`clipboard` / `audio` / `file`），经进程内通道按对端 ID 投递给会话进程，等价于「请求键鼠控制」；协议新增 `OptionMessage.request_permission` 字段，`disable_*` 说的是「我要关」而它说的是「可以吗」，答案仍由对端本机用户在本地确认界面上给；相应修正 §6.7.4 的措辞——对端可以开口要，但决定入口仍只有本接口与会话面板 |
 | 2026-09-21 | 1.10 | `POST /permission`（§6.7.4）的权限名收敛到 `keyboard` / `clipboard` / `audio` / `file` 四项：远程重启、阻止用户输入、隐私模式不再提供，录制会话不再是可切换项；这四项在会话建立时固定为关闭，对端的权限请求不能再代替本机用户打开它们（具体见客户端集成设计方案 §7.1 的三类划分） |
 | 2026-09-20 | 1.9 | 新增控制端端点 `POST /request-control`（§6.9）：向已打开的会话请求对端键鼠控制，经进程内通道按对端 ID 投递给会话进程，等价于远程窗口菜单里的「请求控制」；新增 503（无该对端的会话进程）与 504（会话进程未按期回应）说明 |
 | 2026-09-17 | 1.8 | 新增受控端会话接口（§6.7）：`GET /sessions` 列出会话与待办请求、`POST /approve` 批准/拒绝接入、`POST /control` 应答控制请求、`POST /permission` 开关权限、`POST /terminate` 结束会话、`POST /dismiss` 清理已结束会话；实现走进程内 `_cm` 通道，与受控端会话面板同一批动作（接口与面板状态互通）；新增审计事件 `login.approve` / `login.deny` / `session.terminate` / `permission.change`（§6.8）；错误码新增 409（会话状态不符）、503（无会话管理器）与 504（管理器未按期回复）；新增 §8.1 被控端无人值守批准流程 |

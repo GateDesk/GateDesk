@@ -1517,10 +1517,16 @@ pub mod connection_manager {
             );
         }
 
-        fn update_control_request(&self, id: i32, pending: bool) {
+        fn update_control_request(&self, id: i32, pending: bool, permission: String) {
             self.push_event(
                 "update_control_request",
-                &[("id", &id.to_string()), ("pending", &pending.to_string())],
+                &[
+                    ("id", &id.to_string()),
+                    ("pending", &pending.to_string()),
+                    // Empty means the keyboard-and-mouse request; a name means the peer
+                    // asked for that one A-class permission.
+                    ("permission", &permission),
+                ],
             );
         }
 

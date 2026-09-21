@@ -779,6 +779,8 @@ class ServerModel with ChangeNotifier {
       final index = _clients.indexWhere((element) => element.id == id);
       if (index == -1) return;
       _clients[index].pendingControl = pending;
+      // Empty for the mouse and keyboard, a name for one of the A-class channels.
+      _clients[index].pendingPermission = evt['permission'] as String? ?? '';
       // Same timeout as `Connection::CONTROL_REQUEST_TIMEOUT`, so the countdown the prompt draws
       // runs out together with the one that matters instead of a second earlier or later.
       _clients[index].controlDeadline = pending
@@ -845,6 +847,11 @@ class Client {
   /// [ServerModel.updateControlRequest] and `Connection::resolve_control_request` in
   /// `src/server/connection.rs`.
   bool pendingControl = false;
+  /// Which permission that request is for, empty for the mouse and keyboard - the one that was
+  /// there before a peer could ask for anything by name. Carried next to [pendingControl] because
+  /// the prompt says what is being asked for, and a window that opens while the request is already
+  /// outstanding rebuilds itself from the connection rather than from the event.
+  String pendingPermission = "";
   /// When [pendingControl] is answered by the server regardless, i.e. the end of the countdown
   /// the prompt shows. Null when the request was already outstanding before this window opened,
   /// in which case only the server still knows the deadline - the prompt then waits without a
@@ -882,6 +889,7 @@ class Client {
     // Only the server knows when an outstanding request expires, so a list rebuilt from
     // `cmGetClientsState()` keeps the fact but not the deadline. See [controlDeadline].
     pendingControl = json['pending_control'] ?? pendingControl;
+    pendingPermission = json['pending_permission'] ?? pendingPermission;
   }
 
   Map<String, dynamic> toJson() {
