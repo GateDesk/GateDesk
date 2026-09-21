@@ -811,7 +811,14 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
 
         #[cfg(target_os = "windows")]
         {
-            if ContextSend::is_enabled() {
+            // Only for a connection that has logged in. This tells the session's own side
+            // to start handing clipboard data over, so it belongs to the connection the
+            // login named - and an IPC client that has not logged in is not one of those.
+            // The local HTTP API connects to this same listener and takes the first frame
+            // as its answer (`http_api::cm_call`), so a handshake sent at it would be read
+            // as the reply to a question it never asked, and every session endpoint would
+            // fail while the clipboard context is up.
+            if self.conn_id > 0 && ContextSend::is_enabled() {
                 log::debug!("Clipboard is enabled");
                 allow_err!(
                     self.stream
