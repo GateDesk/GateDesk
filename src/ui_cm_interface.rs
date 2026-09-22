@@ -392,44 +392,6 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                     },
                 }
             }
-            // The other call that is not about one session: the caller is a program
-            // that does not hold a session id, so the switch goes to every live one.
-            // A caller that does have an id names it through `Permission`.
-            LocalApiAction::Voice { enabled } => {
-                // The policy the panel's own switches obey, see `switch_permission`,
-                // checked here as well so the caller is told instead of the request
-                // being logged and dropped.
-                if !permission_change_allowed() {
-                    return LocalApiReply::Conflict {
-                        reason: "permissions cannot be changed in the accept window".to_owned(),
-                    };
-                }
-                let ids: Vec<i32> = CLIENTS
-                    .read()
-                    .unwrap()
-                    .iter()
-                    .filter(|(_, c)| !c.disconnected)
-                    .map(|(id, _)| *id)
-                    .collect();
-                if ids.is_empty() {
-                    // Voice lives inside a session. With none running there is
-                    // nothing to switch, and saying so beats reporting a switch
-                    // that went nowhere.
-                    return LocalApiReply::Conflict {
-                        reason: "no live session".to_owned(),
-                    };
-                }
-                let count = ids.len();
-                for id in ids {
-                    // The same pair the `Permission` arm uses: the switch goes out to the
-                    // connection first, then the state this process reports is updated.
-                    switch_permission(id, "audio".to_owned(), enabled);
-                    self.set_permission_locally(id, "audio", enabled);
-                }
-                LocalApiReply::Ok {
-                    data: format!("{{\"enabled\":{},\"sessions\":{}}}", enabled, count),
-                }
-            }
             _ if !exists => LocalApiReply::NotFound,
             LocalApiAction::Approve { accept } => {
                 if authorized {

@@ -624,11 +624,11 @@ impl SciterSession {
             .unwrap()
             .initialize(id, conn_type, None, force_relay, None, None, None);
 
-        // The local API on this machine (`POST /request-control`, `POST
-        // /request-permission`) runs in the `--server` process, not this one, so it
-        // reaches this session over IPC. The listener is named after the peer: several
-        // sessions can be open at once, one listener each, and the toggle is the same one
-        // the window's "Request control" menu item runs.
+        // The local API on this machine (`POST /request-permission`) runs in the
+        // `--server` process, not this one, so it reaches this session over IPC. The
+        // listener is named after the peer: several sessions can be open at once, one
+        // listener each, and the toggle is the same one the window's "Request control"
+        // menu item runs.
         let listener_session = session.clone();
         // Named so it can be told apart from the other threads this process runs, and
         // started through Builder because failing to create it must not take the session

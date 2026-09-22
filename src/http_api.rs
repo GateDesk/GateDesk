@@ -18,7 +18,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 ///   with 403 and get no CORS header.
 const PORT: u16 = 21120;
 
-/// Unified cap for request bodies (bytes). /password and /voice payloads are small.
+/// Unified cap for request bodies (bytes). /password payloads are small.
 const MAX_BODY_BYTES: usize = 1024;
 
 thread_local! {
@@ -471,53 +471,6 @@ fn handle_password(mut request: Request) {
     }
 }
 
-/// Toggle voice: the operator's request to hear what this machine is playing.
-///
-/// Worth being explicit about what this is not. Voice is the audio channel of the
-/// live sessions, so this flips the `audio` permission on every session this machine
-/// currently has - the same permission the session panel's audio row flips, and the
-/// same one `POST /permission` can name. With no session running there is nothing to
-/// switch to, and the caller is told so rather than left believing it worked.
-///
-/// It used to write the `audio-input` option instead. That option holds the recording
-/// device's *name*, so the "Y" written there made the audio service look for a device
-/// called "Y", fall back to the default input device and, on a machine with no
-/// microphone, fail to start at all: the permission was granted and no sound came out.
-fn handle_voice(mut request: Request) {
-    let body = read_body(&mut request, MAX_BODY_BYTES);
-    match json_field(&body, "enabled") {
-        Some(v) if v == "true" || v == "false" => {
-            let on = v == "true";
-            let reply = match cm_call(LocalApiCall {
-                id: 0,
-                action: LocalApiAction::Voice { enabled: on },
-            }) {
-                Ok(reply) => reply,
-                Err((status, reason)) => return respond(request, status, error_body(&reason)),
-            };
-            // Recorded as err when the manager refused it (no session, or the policy
-            // that locks permissions in the accept window): the event is what says the
-            // platform asked, and the reason is in the response the caller got.
-            crate::audit::record(
-                if on { "voice.on" } else { "voice.off" },
-                "operator",
-                0,
-                match &reply {
-                    LocalApiReply::Ok { .. } => "ok",
-                    _ => "err",
-                },
-                serde_json::json!({"method": "http-api"}),
-            );
-            respond_reply(request, reply, "result");
-        }
-        _ => respond(
-            request,
-            400,
-            error_body("missing or invalid enabled"),
-        ),
-    }
-}
-
 // --- sessions ---------------------------------------------------------------
 //
 // The endpoints below drive this machine as the CONTROLLED side: letting a peer
@@ -614,42 +567,18 @@ fn bool_field(body: &str, key: &str) -> Option<bool> {
     }
 }
 
-/// `POST /request-control` `{"id":"<peer id>"}` - ask a peer for control.
-///
-/// This is the controller-side counterpart of `/control`: the operator asks, the peer
-/// answers its own prompt. The ask is the `disable_keyboard` option being cleared,
-/// which is what the remote window's "Request control" menu item does, and the session
-/// stays view-only until the peer agrees.
-///
-/// The connection lives in the session process this API spawned (`POST /connect`), so
-/// the request is forwarded over IPC to `_control_<peer id>`: one listener per session,
-/// so several open sessions do not have to share a single name.
-fn handle_request_control(mut request: Request) {
-    let body = read_body(&mut request, MAX_BODY_BYTES);
-    let Some(id) = json_field(&body, "id") else {
-        return respond(request, 400, error_body("id is required"));
-    };
-    if !valid_peer_id(&id) {
-        return respond(request, 400, error_body("invalid id"));
-    }
-    match ask_session_for_control(&id, "") {
-        Ok(()) => respond(request, 200, "{\"ok\":true}".to_owned()),
-        Err((status, reason)) => respond(request, status, error_body(&reason)),
-    }
-}
-
 /// `POST /request-permission` `{"id":"<peer id>","name":"clipboard"}` - ask a peer to
-/// open one of its A-class channels.
+/// open one of its permissions for this session.
 ///
-/// The counterpart of `/permission`, the way `/request-control` is the counterpart of
-/// `/control`: `/permission` is for the machine being controlled and switches one of its
-/// permissions here, while this one is for the operator and asks the peer to do it
-/// there. The peer's local user answers it in their own panel, and the answer comes back
-/// as the peer simply starting to use the channel - there is no result to wait for, which
-/// is why the ack only says the session took the request.
+/// The counterpart of `/permission`: `/permission` is for the machine being controlled and
+/// switches one of its permissions here, while this one is for the operator and asks the
+/// peer to do it there. The peer's local user answers it in their own window, and apart
+/// from the keyboard the answer only shows up as the peer starting to use the channel -
+/// there is no result to wait for, which is why the ack only says the session took the
+/// request.
 ///
-/// The name is one of the A-class channels: `clipboard`, `audio`, `file`. Mouse and
-/// keyboard is `/request-control` and has no name here.
+/// The name is one of the four the controlled side draws a switch for: `keyboard`,
+/// `clipboard`, `audio`, `file`.
 fn handle_request_permission(mut request: Request) {
     let body = read_body(&mut request, MAX_BODY_BYTES);
     let Some(id) = json_field(&body, "id") else {
@@ -661,13 +590,20 @@ fn handle_request_permission(mut request: Request) {
     let Some(name) = json_field(&body, "name") else {
         return respond(request, 400, error_body("name is required"));
     };
-    // Refused here rather than at the peer: a name the peer does not know is a caller
-    // mistake, and sending it would only buy a prompt the local user cannot act on. The
-    // list is `Connection::is_requestable_permission`'s, from the other end.
-    if !matches!(name.as_str(), "clipboard" | "audio" | "file") {
-        return respond(request, 400, error_body("unknown permission"));
-    }
-    match ask_session_for_control(&id, &name) {
+    // `keyboard` is a name here but not on the wire: the peer is asked for it by clearing
+    // `disable_keyboard`, which is the ask `ask_session_for_control` spells as an empty
+    // name - the same one the remote window's "Request control" menu item makes. The other
+    // three travel as the peer's `request_permission` field, so
+    // `Connection::is_requestable_permission` names just those, from the other end.
+    //
+    // Anything else is refused here rather than sent on: the peer has nothing to act on,
+    // and the only thing sending it would buy is a prompt its local user cannot answer.
+    let permission = match name.as_str() {
+        "keyboard" => "",
+        "clipboard" | "audio" | "file" => name.as_str(),
+        _ => return respond(request, 400, error_body("unknown permission")),
+    };
+    match ask_session_for_control(&id, permission) {
         Ok(()) => respond(request, 200, "{\"ok\":true}".to_owned()),
         Err((status, reason)) => respond(request, status, error_body(&reason)),
     }
@@ -689,7 +625,8 @@ fn valid_peer_id(id: &str) -> bool {
 /// Hand the request to the session that owns `peer_id`.
 ///
 /// `permission` is empty for the mouse and keyboard request and one of the A-class
-/// channels otherwise; the session turns it into its own toggle.
+/// channels otherwise; the session turns it into its own toggle. Empty is the internal
+/// spelling of the `keyboard` name the API takes - see `handle_request_permission`.
 ///
 /// A 503 means no session process is listening for that peer - nothing was opened, or
 /// the session has already gone - which the caller may have to tell apart from a peer
@@ -911,9 +848,6 @@ fn handle(request: Request) {
         (&Method::Post, "/disconnect") => {
             handle_disconnect(request);
         }
-        (&Method::Post, "/request-control") => {
-            handle_request_control(request);
-        }
         (&Method::Post, "/request-permission") => {
             handle_request_permission(request);
         }
@@ -937,9 +871,6 @@ fn handle(request: Request) {
         }
         (&Method::Post, "/dismiss") => {
             handle_dismiss(request);
-        }
-        (&Method::Post, "/voice") => {
-            handle_voice(request);
         }
         (&Method::Get, _) | (&Method::Post, _) => {
             respond(request, 404, "{\"error\":\"not found\"}".to_owned());
