@@ -6497,13 +6497,14 @@ async fn start_ipc(
         stream = Some(s);
     }
     if stream.is_none() {
-        // Which window answers a control request follows how this process was started: an
-        // explicit `--ui` keeps the connection manager, the headless default gets the session
-        // panel. The spawned process cannot see our arguments, so it is told which to use.
+        // Both skins of the window that answers a control request are the same process
+        // started the same way, with `--cm`; which skin it draws follows `--ui`, which a
+        // child cannot see for itself and so is passed along with the argument. An explicit
+        // `--ui` keeps the connection manager, the headless default gets the session panel.
         let args = if crate::common::is_ui_mode() {
-            vec!["--cm"]
+            vec!["--cm", "--ui"]
         } else {
-            vec!["--gd-panel"]
+            vec!["--cm"]
         };
         let run_done;
         if crate::platform::is_root() {

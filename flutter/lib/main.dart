@@ -104,12 +104,14 @@ Future<void> main(List<String> args) async {
     debugPrint("--cm started");
     desktopType = DesktopType.cm;
     await windowManager.ensureInitialized();
-    runConnectionManagerScreen();
-  } else if (args.isNotEmpty && args.first == '--gd-panel') {
-    debugPrint("--gd-panel started");
-    desktopType = DesktopType.cm;
-    await windowManager.ensureInitialized();
-    runSessionPanelScreen();
+    // One window, two skins, and `--ui` is which: the connection manager as upstream draws
+    // it, or the session panel the headless default answers control requests in. See the
+    // same pairing in `src/ui.rs`.
+    if (args.contains('--ui')) {
+      runConnectionManagerScreen();
+    } else {
+      runSessionPanelScreen();
+    }
   } else if (args.contains('--install')) {
     runInstallPage();
   } else {

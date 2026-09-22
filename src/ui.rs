@@ -206,29 +206,34 @@ pub fn start(args: &mut [String]) {
         frame.sciter_handler(UIHostHandler {});
         page = "install.html";
     } else if args[0] == "--cm" {
+        // One window, two skins, and how this process was started is which: an explicit
+        // `--ui` keeps the connection manager as upstream draws it (cm.tis, the eight
+        // switches, the tab strip), while the headless default answers control requests in
+        // a skin of its own (cm_sh.tis, the four A-class channels and the prompt for one of
+        // them). Both drive the same handler, so nothing on the Rust side is page-specific.
+        // The skin travels in `--ui` rather than in a second argument name because a child
+        // process cannot see how its parent was started.
         frame.register_behavior("connection-manager", move || {
             Box::new(cm::SciterConnectionManager::new())
         });
-        page = "cm.html";
-        *cm::HIDE_CM.lock().unwrap() = crate::ipc::get_config("hide_cm")
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            == "true";
-    } else if args[0] == "--gd-panel" {
-        // The connection manager in another skin: what a client started without `--ui`
-        // answers control requests in. Same handler as the original page, because it drives
-        // the same permission calls.
-        frame.register_behavior("connection-manager", move || {
-            Box::new(cm::SciterConnectionManager::new())
-        });
-        // This is the only place the peer that is connected right now can be answered, and
-        // the server starts a new one only when the *next* connection arrives, so its close
-        // button may not take the process down: it minimizes the window instead, and the
-        // window comes back to the front when the next request needs an answer.
-        #[cfg(windows)]
-        panel_window::tame_title_bar(frame.get_hwnd() as isize);
-        page = "cm_sh.html";
+        if crate::common::is_ui_mode() {
+            page = "cm.html";
+            *cm::HIDE_CM.lock().unwrap() = crate::ipc::get_config("hide_cm")
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+                == "true";
+        } else {
+            // This is the only place the peer that is connected right now can be answered,
+            // and the server starts a new one only when the *next* connection arrives, so
+            // its close button may not take the process down: it minimizes the window
+            // instead, and the window comes back to the front when a request needs an
+            // answer. `hide_cm` is deliberately not read for this skin, for the same
+            // reason: a window that may hide itself can hide a request behind itself.
+            #[cfg(windows)]
+            panel_window::tame_title_bar(frame.get_hwnd() as isize);
+            page = "cm_sh.html";
+        }
     } else if (args[0] == "--connect"
         || args[0] == "--file-transfer"
         || args[0] == "--port-forward"

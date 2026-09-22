@@ -746,10 +746,7 @@ pub fn core_main() -> Option<Vec<String>> {
         } else if args[0] == "--cm" {
             // call connection manager to establish connections
             // meanwhile, return true to call flutter window to show control panel
-            crate::ui_interface::start_option_status_sync();
-        } else if args[0] == "--gd-panel" {
-            // Session panel: what the headless default uses instead of the connection
-            // manager. Same option sync, because it shows the same permission toggles.
+            // (the window has two skins; which one is `--ui`, see `ui.rs`)
             crate::ui_interface::start_option_status_sync();
         } else if args[0] == "--whiteboard" {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]

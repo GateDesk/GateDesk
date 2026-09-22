@@ -1,7 +1,7 @@
 /// The session panel: the window a headless client answers control requests in.
 ///
-/// It plays the connection manager's part - it is started as `--gd-panel`, the process the
-/// server spawns instead of `--cm` when the app was started without `--ui` - so how a request
+/// It plays the connection manager's part - it is started as `--cm` without `--ui`, which is
+/// what the server spawns when the app itself was started without `--ui` - so how a request
 /// reaches the screen is unchanged and only the drawing differs. What it drops is the tab bar
 /// and the chat, both of which need somewhere else to be read, and what it adds is that it may
 /// not hide itself: it is the only place a request can be answered, so a prompt that ends up
@@ -508,8 +508,8 @@ class _ControlRequest extends StatefulWidget {
 /// The noun the prompt puts inside its sentence for a permission a peer asked for.
 ///
 /// Not the switch labels this file draws further down ("Enable clipboard"): those are sentences
-/// of their own and read wrong after "requests to enable". The same table is in `cm.rs`, `cm.tis`
-/// and `panel.tis` - one per front end, since a translated string only exists where it is drawn.
+/// of their own and read wrong after "requests to enable". The same table is in `cm.rs` and
+/// `cm_sh.tis` - one per front end, since a translated string only exists where it is drawn.
 String _permissionLabel(String name) {
   switch (name) {
     case 'keyboard':

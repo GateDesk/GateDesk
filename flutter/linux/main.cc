@@ -70,10 +70,11 @@ int main(int argc, char** argv) {
       return 0;
   }
   for (int i = 0; i < argc; i++) {
-    // The session panel plays the connection manager's part in another skin, so it starts at
-    // that window's size rather than at the main window's; the exact size is set from Dart.
-    // See `common::IS_CM` for the same pairing on the Rust side.
-    if (strcmp(argv[i], "--cm") == 0 || strcmp(argv[i], "--gd-panel") == 0) {
+    // The window that answers a control request - in either of its two skins, since both are
+    // started as `--cm` - starts at the connection manager's size rather than at the main
+    // window's; the exact size is set from Dart. See `common::IS_CM` for the same pairing on
+    // the Rust side.
+    if (strcmp(argv[i], "--cm") == 0) {
       gIsConnectionManager = true;
     }
   }

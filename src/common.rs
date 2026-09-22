@@ -105,12 +105,10 @@ lazy_static::lazy_static! {
     // Is server logic running. The server code can invoked to run by the main process if --server is not running.
     static ref SERVER_RUNNING: Arc<RwLock<bool>> = Default::default();
     static ref IS_MAIN: bool = std::env::args().nth(1).map_or(true, |arg| !arg.starts_with("--"));
-    // Both windows play the connection manager's part and are told apart by how their page is
-    // drawn, not by what they are for: `--gd-panel` is the same role in the session panel skin.
-    static ref IS_CM: bool = matches!(
-        std::env::args().nth(1).as_deref(),
-        Some("--cm") | Some("--gd-panel")
-    );
+    // The window that plays the connection manager's part. It has two skins - the one
+    // upstream draws and the session panel - and they are the same role in the same kind of
+    // process, told apart by `--ui` rather than by anything here.
+    static ref IS_CM: bool = std::env::args().nth(1) == Some("--cm".to_owned());
 }
 
 pub struct SimpleCallOnReturn {

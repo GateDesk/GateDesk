@@ -16,7 +16,7 @@ typedef void (*FUNC_RUSTDESK_FREE_ARGS)( char**, int);
 typedef int (*FUNC_RUSTDESK_GET_APP_NAME)(wchar_t*, int);
 typedef int (*FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)();
 /// Note: `--server`, `--service` are already handled in [core_main.rs].
-const std::vector<std::string> parameters_white_list = {"--install", "--cm", "--gd-panel"};
+const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
 
 const wchar_t* getWindowClassName();
 
@@ -128,19 +128,19 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   flutter::DartProject project(L"data");
-  // connection manager hide icon from taskbar
+  // The window that answers a control request, in either of its two skins: no taskbar entry,
+  // and a title of its own. Both are started as `--cm`; `--ui` picks the skin (see the same
+  // pairing in `src/ui.rs`), and the session panel is the one the headless default asks for.
   bool is_cm_page = false;
   auto cmParam = std::string("--cm");
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, cmParam.size(), cmParam.c_str()) == 0) {
     is_cm_page = true;
   }
-  // The session panel stands in for the connection manager when the app was started without
-  // `--ui`, so it is the same kind of window: no taskbar entry, and a title of its own.
-  bool is_panel_page = false;
-  auto panelParam = std::string("--gd-panel");
-  if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, panelParam.size(), panelParam.c_str()) == 0) {
-    is_panel_page = true;
-  }
+  auto uiParam = std::string("--ui");
+  bool is_ui = std::find(command_line_arguments.begin(),
+                         command_line_arguments.end(),
+                         uiParam) != command_line_arguments.end();
+  bool is_panel_page = is_cm_page && !is_ui;
   bool is_install_page = false;
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, installParam.size(), installParam.c_str()) == 0) {
     is_install_page = true;
@@ -167,10 +167,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   Win32Desktop::FitToWorkArea(origin, size);
 
   std::wstring window_title;
-  if (is_cm_page) {
-    window_title = app_name + L" - Connection Manager";
-  } else if (is_panel_page) {
+  if (is_panel_page) {
     window_title = app_name + L" - Session";
+  } else if (is_cm_page) {
+    window_title = app_name + L" - Connection Manager";
   } else if (is_install_page) {
     window_title = app_name + L" - Install";
   } else {
