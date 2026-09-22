@@ -124,7 +124,7 @@ class Body: Reactor.Component
                 {c.is_view_camera ? <div>{translate('View camera')}</div> : ""}
                 {c.is_terminal ? <div>{translate('Terminal')}</div> : ""}
                 {c.port_forward ? <div>Port Forwarding: {c.port_forward}</div> : ""}
-                <div style="size:*"/>
+                {connected && c.pending_control ? "" : <div style="size:*"/>}
                 {connected && c.pending_control ? <div .control-request>
                     <div>{request_title(c)}</div>
                     <div .inner_buttons>
@@ -392,6 +392,10 @@ handler.updateControlRequest = function(id, pending, permission) {
             c.pending_permission = permission;
         }
     });
+    // A question nobody is looking at is a question that times out. The window may be
+    // behind something else, and `addConnection` minimises it three seconds after a
+    // session is under way - so bring it up when someone is actually asking.
+    if (pending) bring_to_top();
     update();
 }
 
