@@ -43,6 +43,7 @@ mod clipboard;
 pub mod core_main;
 pub mod http_api;
 mod audit;
+mod event;
 mod custom_server;
 mod lang;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -72,5 +73,8 @@ pub mod privacy_mode;
 pub mod virtual_display_manager;
 
 mod kcp_stream;
+
+
+
 
 

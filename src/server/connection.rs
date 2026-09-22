@@ -1879,6 +1879,14 @@ impl Connection {
         // Releases the budget `check_id_whitelist` charges against this address: only a peer
         // that got this far proved more than a self-reported id.
         self.clear_id_whitelist_failures();
+        // Both ways in arrive here - a valid password, and a person clicking Accept -
+        // so this is the one place a session becomes usable and the one place to say so.
+        crate::event::notify(
+            "session.open",
+            self.lr.session_id,
+            &self.lr.my_id,
+            serde_json::json!({}),
+        );
         let (conn_type, auth_conn_type) = if self.file_transfer.is_some() {
             (1, AuthConnType::FileTransfer)
         } else if self.port_forward_socket.is_some() {
@@ -2458,6 +2466,18 @@ impl Connection {
             privacy_mode: self.privacy_mode,
             from_switch: self.from_switch,
         });
+        if !authorized {
+            // A peer that has not been let in yet. It may never be a person at this
+            // machine who decides: the platform can answer instead (§6.7.2), and until
+            // now the only way it could find out was to poll `/sessions` fast enough
+            // to catch a card that a peer's own timeout can remove.
+            crate::event::notify(
+                "login.pending",
+                self.lr.session_id,
+                &self.lr.my_id,
+                serde_json::json!({}),
+            );
+        }
     }
 
     #[inline]
@@ -5052,6 +5072,15 @@ impl Connection {
                             pending: true,
                             permission: String::new(),
                         });
+                        // An empty `permission` is the keyboard, the same spelling
+                        // `ipc::Data::ControlRequest` uses and the reversed spelling of
+                        // the `keyboard` name the local API takes (§6.10).
+                        crate::event::notify(
+                            "control.pending",
+                            self.lr.session_id,
+                            &self.lr.my_id,
+                            serde_json::json!({"permission": ""}),
+                        );
                     }
                 } else {
                     self.disable_keyboard = q == BoolOption::Yes;
@@ -5095,8 +5124,14 @@ impl Connection {
                     Some(Instant::now() + Self::CONTROL_REQUEST_TIMEOUT);
                 self.send_to_cm(ipc::Data::ControlRequest {
                     pending: true,
-                    permission: name,
+                    permission: name.clone(),
                 });
+                crate::event::notify(
+                    "control.pending",
+                    self.lr.session_id,
+                    &self.lr.my_id,
+                    serde_json::json!({"permission": name}),
+                );
             }
         }
         // For compatibility with old versions ( < 1.2.4 ).
@@ -5379,6 +5414,15 @@ impl Connection {
             return;
         }
         self.closed = true;
+        // The guard above is what makes this a once-only notice: every way a session
+        // can end (the peer left, a person ended it, the login was refused, the window
+        // was closed) funnels into this one place.
+        crate::event::notify(
+            "session.close",
+            self.lr.session_id,
+            &self.lr.my_id,
+            serde_json::json!({"reason": reason}),
+        );
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
