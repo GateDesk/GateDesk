@@ -29,7 +29,14 @@ const CHANNEL_RC_NO_MEMORY: u32 = 12;
 /// used by FreeRDP to represent errors.
 const ERROR_INTERNAL_ERROR: u32 = 0x54F;
 
-pub type size_t = ::std::os::raw::c_ulonglong;
+/// C's `size_t`: whatever the target's pointer width is.
+///
+/// The bindings were generated on x86_64, where `c_ulonglong` happens to be right. In the
+/// 32-bit build this UI also ships as, it is not: the callee reads one argument slot more
+/// than the caller wrote, so the file name pointer is swallowed into the high half of the
+/// count and `handle_clipboard_files` is handed a count that is not a count - which is what
+/// walking that file name array then crashes on.
+pub type size_t = usize;
 pub type __vcrt_bool = bool;
 pub type wchar_t = ::std::os::raw::c_ushort;
 
