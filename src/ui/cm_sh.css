@@ -242,10 +242,9 @@ div.tab-arrows span:active {
 /* --- the question a peer asks -------------------------------------------
  *
  * Drawn by the `div.control-request` block in cm_sh.tis: what is being asked for, and
- * the two answers. panel.css styles the same block for the card panel (`div.request`);
- * this file had none, so the block was a bare pair of stacked divs sitting flush against
- * whatever came before it, with nothing to separate the sentence from the buttons under
- * it and no width of its own to wrap the sentence in.
+ * the two answers. This file had none, so the block was a bare pair of stacked divs
+ * sitting flush against whatever came before it, with nothing to separate the sentence
+ * from the buttons under it and no width of its own to wrap the sentence in.
  */
 
 div.control-request {

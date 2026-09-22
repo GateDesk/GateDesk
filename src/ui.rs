@@ -276,8 +276,6 @@ pub fn start(args: &mut [String]) {
             inline::get_cm()
         } else if page == "cm_sh.html" {
             inline::get_cm_sh()
-        } else if page == "panel.html" {
-            inline::get_panel()
         } else if page == "install.html" {
             inline::get_install()
         } else {

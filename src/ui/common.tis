@@ -45,8 +45,8 @@ function translate(name) {
 // remote side; a click arriving inside that window is taken to be the peer driving the
 // local mouse and is dropped. That is what keeps a peer which already has the keyboard
 // from pressing the buttons that decide what it may do. Used by every window that decides
-// such things: cm.tis (the connection manager), cm_sh.tis (the same window in the skin the
-// headless form draws) and panel.tis.
+// such things: cm.tis (the connection manager) and cm_sh.tis (the same window in the skin
+// the headless form draws).
 function checkClickTimeFor(id, callback) {
     var click_callback_time = getTime();
     handler.check_click_time(id);

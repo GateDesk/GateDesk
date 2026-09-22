@@ -20,8 +20,8 @@ pub struct SciterHandler {
 ///
 /// Not the switch labels the panel draws ("Enable clipboard"): those are sentences of
 /// their own and read wrong after "requests to enable". The same table is in the hide-cm
-/// dialog above, `cm.tis` and `panel.tis` - one per front end, since a translated string
-/// only exists where it is drawn.
+/// dialog above and in `cm_sh.tis` - one per front end, since a translated string only
+/// exists where it is drawn.
 #[cfg(windows)]
 fn permission_label(name: &str) -> &str {
     match name {
