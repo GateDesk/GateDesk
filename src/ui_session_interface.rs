@@ -177,7 +177,6 @@ impl ChangeDisplayRecord {
 impl SessionPermissionConfig {
     pub fn is_text_clipboard_required(&self) -> bool {
         *self.server_clipboard_enabled.read().unwrap()
-            && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
             && !self.lc.read().unwrap().view_only.v
     }
@@ -185,8 +184,7 @@ impl SessionPermissionConfig {
     #[cfg(feature = "unix-file-copy-paste")]
     pub fn is_file_clipboard_required(&self) -> bool {
         let lc = self.lc.read().unwrap();
-        *self.server_keyboard_enabled.read().unwrap()
-            && *self.server_file_transfer_enabled.read().unwrap()
+        *self.server_file_transfer_enabled.read().unwrap()
             && lc.enable_file_copy_paste.v
             && !lc.view_only.v
     }
@@ -457,19 +455,33 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().is_privacy_mode_supported()
     }
 
+    /// Whether the peer's clipboard may still be read and written.
+    ///
+    /// Upstream asks for the peer's keyboard permission here as well, and GateDesk opens
+    /// the four A-class channels one at a time: a peer that granted its clipboard but not
+    /// input would have its text refused, and input is the one an operator has to ask
+    /// for. Text travels on the clipboard permission. The same predicate in
+    /// `SessionPermissionConfig` above drops the same condition.
     #[cfg(not(target_os = "ios"))]
     pub fn is_text_clipboard_required(&self) -> bool {
         *self.server_clipboard_enabled.read().unwrap()
-            && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
             && !self.lc.read().unwrap().view_only.v
     }
 
+    /// Whether files may still be pasted between this machine and the peer.
+    ///
+    /// Upstream asks for the peer's keyboard permission here as well. GateDesk's local
+    /// user opens the four A-class channels one at a time, and input is the one an
+    /// operator has to ask for, so that pairing refuses files to a peer that granted
+    /// files but not input - a channel that works, reported closed, with nothing anywhere
+    /// saying why. The permission that carries files is the file one, and view-only stays
+    /// the operator's own choice. The same predicate in `SessionPermissionConfig` above
+    /// drops the same condition.
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     pub fn is_file_clipboard_required(&self) -> bool {
         let lc = self.lc.read().unwrap();
-        *self.server_keyboard_enabled.read().unwrap()
-            && *self.server_file_transfer_enabled.read().unwrap()
+        *self.server_file_transfer_enabled.read().unwrap()
             && lc.enable_file_copy_paste.v
             && !lc.view_only.v
     }
