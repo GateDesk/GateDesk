@@ -5026,10 +5026,17 @@ impl Connection {
         if let Ok(q) = o.enable_file_transfer.enum_value() {
             if q != BoolOption::NotSet {
                 self.enable_file_transfer = q == BoolOption::Yes;
+                // What the window's `file_transfer_enabled_peer` holds: whether the *peer*
+                // asked for file transfer. It used to be sent `file_transfer_enabled()` -
+                // this side's permission *and* this option - which is only ever the same
+                // thing once the local user has allowed the permission. They no longer have
+                // by the time this arrives: the A-class channels start shut and this option
+                // comes with the login, so the pair was always false here and the window
+                // went on refusing the files the local user had just allowed. The permission
+                // half needs no telling - the window's own flag moves when the switch is
+                // clicked.
                 #[cfg(target_os = "windows")]
-                self.send_to_cm(ipc::Data::ClipboardFileEnabled(
-                    self.file_transfer_enabled(),
-                ));
+                self.send_to_cm(ipc::Data::ClipboardFileEnabled(self.enable_file_transfer));
                 #[cfg(feature = "unix-file-copy-paste")]
                 if !self.enable_file_transfer {
                     self.try_empty_file_clipboard();
