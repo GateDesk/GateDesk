@@ -323,6 +323,10 @@ function checkClickTime(callback) {
 function update() {
     header.update();
     body.update();
+    // Whether the prompt is up is what decides the height, and the prompt is measured
+    // from the layout - which is not there yet when this returns, so the measuring waits
+    // a tick, the same way `adjustHeader` does.
+    self.timer(1ms, fit_window_height);
 }
 
 function bring_to_top(idx=-1) {
@@ -430,12 +434,23 @@ view << event statechange {
     adjustBorder();
 }
 
-function self.ready() {
-    adjustBorder();
+// The strip: a column 300 dip wide at the top right of the work area, and as tall as what
+// it has to show. 400 dip is what the four permission rows and the buttons need; a peer's
+// request puts the prompt above them, and a height that stays at 400 leaves the sentence
+// and its two answers below the bottom edge of the window.
+function fit_window_height() {
     var (sw, sh) = view.screenBox(#workarea, #dimension);
     var w = scaleIt(300);
     var h = scaleIt(400);
+    var prompt = $(div.control-request);
+    if (prompt) h += prompt.box(#height) + scaleIt(16);
+    if (h > sh) h = sh;
     view.move(sw - w, 0, w, h);
+}
+
+function self.ready() {
+    adjustBorder();
+    fit_window_height();
 }
 
 function getElapsed(time, now) {
