@@ -271,11 +271,17 @@ pub fn start(args: &mut [String]) {
         // Which skin this window draws is decided the same way the connection manager's
         // is: an explicit `--ui` keeps the original page, anything else gets the skin the
         // enterprise build uses. See the `--cm` branch above and `src/ui/remote_sh.tis`.
-        page = if crate::common::is_ui_mode() {
-            "remote.html"
+        if crate::common::is_ui_mode() {
+            page = "remote.html";
         } else {
-            "remote_sh.html"
-        };
+            // Read back by the client loop, which records this skin's sessions unasked.
+            crate::common::set_remote_skin(true);
+            page = "remote_sh.html";
+            // An uploaded recording is kept on this machine for a while and then dropped;
+            // only files this skin uploaded carry the marker that allows it.
+            let dir = crate::ui_interface::video_save_directory(false);
+            std::thread::spawn(move || crate::record_upload::cleanup(&dir));
+        }
     } else {
         log::error!("Wrong command: {:?}", args);
         return;

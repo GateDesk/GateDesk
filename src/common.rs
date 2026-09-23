@@ -1129,6 +1129,23 @@ pub fn is_ui_mode() -> bool {
     UI_MODE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether this session window draws the enterprise skin (`remote_sh.html`) rather than
+/// the original `remote.html`.
+///
+/// Set by `ui::start` once it has picked the page, and read back by the client loop: the
+/// enterprise skin records every session on its own (see `client/io_loop.rs`), because
+/// nobody sits in front of that window to press the record button.
+static REMOTE_SKIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_remote_skin(enabled: bool) {
+    REMOTE_SKIN.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[inline]
+pub fn is_remote_skin() -> bool {
+    REMOTE_SKIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[inline]
 pub fn get_uri_prefix() -> String {
     format!("{}://", get_app_name().to_lowercase())

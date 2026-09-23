@@ -2456,8 +2456,11 @@ impl<T: InvokeUiSession> Remote<T> {
         );
         self.video_threads.insert(display, video_thread);
         if self.video_threads.len() == 1 {
-            let auto_record =
-                LocalConfig::get_bool_option(config::keys::OPTION_ALLOW_AUTO_RECORD_OUTGOING);
+            // The enterprise skin records every session on its own: it is the console the
+            // operator is not sitting in front of, so nobody would press the record
+            // button. The original window keeps the plain option.
+            let auto_record = crate::common::is_remote_skin()
+                || LocalConfig::get_bool_option(config::keys::OPTION_ALLOW_AUTO_RECORD_OUTGOING);
             self.handler.lc.write().unwrap().record_state = auto_record;
             self.update_record_state();
         }

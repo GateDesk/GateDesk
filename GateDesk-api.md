@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.21（2026-09-23）
+> 版本：1.22（2026-09-23）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -654,6 +654,111 @@ curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id
 
 两者可以指向同一个平台，但建议用不同路径（如 `/api/audit` 与 `/api/event`），不要把提示和记录混在一个端点上。
 
+### 6.11 会话录像（控制端，v1.22）
+
+控制端录屏，并把定制皮肤录下的文件上传到审计服务端。
+
+通过本 API 的 `POST /connect`（§6.2）发起的会话自动录屏，会话结束后把文件上传到审计服务端。手动录制照常可用，两种录像落在同一个目录，区别只在自动录的这一种会上传。
+
+不自动录屏时，是否开录由本机选项 `allow-auto-record-outgoing` 决定；这样录下的文件只留在本机，不上传。
+
+开录时点在连接的第一个画面线程建立处（`client/io_loop.rs`），与 `record.start` / `record.stop` 审计是同一个去重翻转点。
+
+#### 本机存放位置
+
+录像目录由本机选项 `video-save-directory` 决定。该键在 `GateDesk_local.toml`，不在 `GateDesk2.toml`。取值不做 `~` 展开，也不做环境变量展开。
+
+没配时按下表顺序取第一个可用的（`ui_interface::video_save_directory`）：
+
+| 顺序 | 取法 | Windows | macOS | Linux |
+|---|---|---|---|---|
+| 1 | 系统视频目录 + `GateDesk` | `C:\Users\<用户>\Videos\GateDesk\` | `~/Movies/GateDesk/` | `~/Videos/GateDesk/`（跟随 XDG） |
+| 2 | 系统视频目录 | `C:\Users\<用户>\Videos\` | `~/Movies/` | `~/Videos/` |
+| 3 | 桌面 | `C:\Users\<用户>\Desktop\` | `~/Desktop/` | `~/Desktop/` |
+| 4 | 主目录 | `C:\Users\<用户>\` | `~/` | `~/` |
+| 5 | exe 同级 `videos\` | `<exe 目录>\videos\` | 同左 | 同左 |
+
+Windows 上以服务身份录制（被控端）走的是另一套：`[options] windows-service-video-save-directory`，没配则 `%SystemDrive%\ProgramData\GateDesk\recording\`。控制端不走这条。
+
+#### 文件名与格式
+
+```
+outgoing_<对端ID>_<yyyyMMddHHmmss毫秒>_<display|camera><显示序号>_<编码>.<webm|mp4>
+```
+
+`outgoing_` 是控制端录的，被控端自己录的是 `incoming_`。编码决定容器：VP8 / VP9 / AV1 用 `.webm`，H264 / H265 用 `.mp4`。例：
+
+```
+outgoing_419984805_20260923171149048_display0_av1.webm
+```
+
+编码器编在二进制里，不需要外部 ffmpeg。录制不足 1 秒或没有有效帧的文件会被删掉，不留文件。
+
+#### 上传
+
+地址取 `audit-server-url` 的源（scheme + host + port）拼 `/api/record`，与审计是同一台服务器，所以只有这一个键；为空则不上传，录像仍写在本机。
+
+请求体是文件字节，不是 JSON；参数走查询串：
+
+| `type` | 含义 | 查询参数 | 请求体 |
+|---|---|---|---|
+| `new` | 建文件 | `file` | 空 |
+| `part` | 追写一段 | `file`、`offset`、`length` | 这一段字节 |
+| `tail` | 收尾（整个文件已传完） | `file` | 文件头（最多 1024 字节） |
+| `remove` | 删除（录像过短被丢弃时） | `file` | 空 |
+
+每个请求另带 `device_id`、`session_id`。
+
+传法由 `[options] record-upload-mode` 决定：
+
+| 值 | 行为 | 代价 |
+|---|---|---|
+| `chunked`（默认） | 边录边传，累计 1 秒或 1 MB 发一段 | 会话中途断掉最多丢最后一秒 |
+| `whole` | 文件关闭后一次发完 | 文件大时占用内存 |
+
+每个请求重试 3 次，间隔 0.5s / 1.0s；仍失败就放弃该文件，不重传，写一条审计事件。目标不可达时就是这样：文件留在本机，服务端没有。
+
+新增两个审计 action，接在 §6.8 的表后：
+
+| action | 触发 | `extra` |
+|---|---|---|
+| `record.upload.done` | 整个文件上传成功 | `{"file":"…","bytes":N}` |
+| `record.upload.fail` | 某个请求重试 3 次仍失败 | `{"file":"…","bytes":N,"step":"new/part","error":"…"}` |
+
+#### 服务端存放位置
+
+落在 `服务端应用` 所在目录下：
+
+```
+recordings/<device_id>/<session_id>/<录像文件名>
+                                   <录像文件名>.head    前 1024 字节
+                                   <录像文件名>.json    大小、上传时间
+```
+
+与平台无关，就是服务端进程旁边多一个 `recordings/`：
+
+| 服务端跑在 | 路径 |
+|---|---|
+| Windows | `C:\...\GateDeskWeb\recordings\<设备ID>\<会话号>\` |
+| macOS | `~/.../GateDeskWeb/recordings/<设备ID>/<会话号>/` |
+| Linux | 同 macOS |
+
+服务端不删录像，保留策略在客户端。
+
+#### 本机保留 7 天
+
+上传成功后在录像旁写一个 `<文件名>.uploaded`，内容是上传时间戳。定制皮肤每次启动扫一遍录像目录，把带标记、且标记时间超过 7 天的录像连同标记一起删掉。没有标记的文件不动，包括从没传成功的和用原版皮肤手动录的。
+
+#### 配置与查看
+
+| 项 | 位置 | 必填 |
+|---|---|---|
+| 上传地址 | `GateDesk2.toml` `[options] audit-server-url`，与审计共用 | 不填则不上传 |
+| 录像目录 | `GateDesk_local.toml` `[options] video-save-directory` | 可选 |
+| 传法 | `GateDesk2.toml` `[options] record-upload-mode` | 可选，默认 `chunked` |
+
+配置在启动时缓存，改完需重启 GateDesk。
+
 ## 7. 错误码
 
 | HTTP | 触发条件 |
@@ -799,6 +904,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-23 | 1.22 | 新增 §6.11 会话录像上传：由本 API `POST /connect` 发起的会话**自动录屏**，会话结束后把录像文件传到审计服务端 —— 上传地址由 `audit-server-url` 的源派生 `/api/record`，不新增地址配置键。协议沿用上游 rustdesk 的 `type=new/part/tail/remove` + raw body 分片；每个请求重试 3 次，失败放弃不重传，成功记 `record.upload.done`、失败记 `record.upload.fail`。本机文件在上传成功后保留 **7 天**，靠 `<文件名>.uploaded` 标记清理，未上传成功的不动。新增配置 `record-upload-mode`（`chunked` 默认 / `whole`）。客户端实现 `GateDesk/src/record_upload.rs`；接收端为 `GateDeskWeb` 的 `POST /api/record`，落在 `recordings/<device_id>/<session_id>/`。§6.11 另写明录像在本机与服务端的**存放位置**（分平台）、文件名与格式、查看命令 |
 | 2026-09-23 | 1.21 | 补充「文件复制粘贴」的**两道闸**（仅文档，无接口变更）：§6.7.4 边界新增一条 —— `file` 打开的是文件通道，复制粘贴文件还要求（1）被控端带 `unix-file-copy-paste` 编译，否则登录附加信息里不上报 `has_file_clipboard`，控制端会话菜单里连「允许复制粘贴文件」都不出现（两端同为 Windows 是唯一例外）；（2）控制端的会话选项 `enable-file-copy-paste` 要打开 —— 它按对端存于 `config/peers/<对端ID>.toml`（`ClientConfig`），不是 `GateDesk2.toml` 的 `[options]`，缺省为开（`GateDesk_default.toml` 可关）。§6.9 差异表后加一条指向说明 |
 | 2026-09-21 | 1.20 | 落地 §6.10 出站事件通知。上报侧新增 `GateDesk/src/event.rs`，用独立的配置键、队列和线程，不重试、无本地兜底、每次投递 3 秒上限；连接层四个点发出 `login.pending` / `control.pending` / `session.open` / `session.close`。接收侧 `GateDeskWeb` 新增 `POST /api/event` 并广播给页面，两个页面收到后立即拉 `/sessions`，兜底轮询在收到过事件之后由 2 秒放到 30 秒。`session.close` 的 `extra` 增加 `reason`。§6.7 各接口的「干什么」标签统一改为「作用」，§6.7.4 与 §8.1 措辞整理。附带修掉 `employee.html` 里仍在调用已删除的 `POST /voice` 的语音按钮，改为按会话调 `POST /permission {"name":"audio"}` |
 | 2026-09-21 | 1.19 | 新增 §6.10 出站事件通知的设计与契约（当时尚未实现），§8.1 增加事件驱动这条发现路径。同时修正四处与实现不符：§1 角色表把 `/password` 归到控制端（它设的是本机密码，属于被控端，改为独立一行）、§1 端点清单还留着已删除的 `/voice`、§6.9 差异表写 `extra.permission` 而实际字段是 `extra.name`、头部维护约定与 §1 的源码路径写成小写 `gatedesk/`。补充 §6.7.4 的三点：`/permission` 没有「必须有在途申请」这个前提、`enable-perm-change-in-accept-window = N` 锁不住 `keyboard`、`permission.change` 的 `actor` 恒为 `customer` |
@@ -893,6 +999,13 @@ audit-server-url = ''
 # 例：http://127.0.0.1:3000/api/event?key=replace_with_secret
 # ==============================
 event-server-url = ''
+
+# ==============================
+# 会话录像上传（v1.22；见接口文档 §6.11）
+# chunked（默认）= 边录边传；whole = 录完一次发完
+# 上传地址由上面的 audit-server-url 派生（源 + /api/record），不单独配置
+# ==============================
+# record-upload-mode = 'chunked'
 
 # ==============================
 # CORS 额外放行的业务页面来源（逗号分隔，可空，v1.7）

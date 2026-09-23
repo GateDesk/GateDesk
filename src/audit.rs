@@ -22,7 +22,7 @@ const AUDIT_LOG_FILE: &str = "audit.log";
 
 /// Config option holding the audit-server base URL (e.g. the PoC server.js
 /// `/api/audit` endpoint). Empty means local audit.log only.
-const AUDIT_SERVER_OPTION: &str = "audit-server-url";
+pub const AUDIT_SERVER_OPTION: &str = "audit-server-url";
 
 /// Serializes appends to audit.log coming from different threads.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
