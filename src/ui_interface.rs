@@ -1241,6 +1241,14 @@ pub fn recent_sessions_updated() -> bool {
 pub fn new_remote(id: String, remote_type: String, force_relay: bool) {
     let mut lock = CHILDREN.lock().unwrap();
     let mut args = vec![format!("--{}", remote_type), id.clone()];
+    // The session window is a process of its own, so it cannot see how this one was
+    // started: an explicit `--ui` has to be passed on, otherwise the child would fall
+    // back to the enterprise skin (`remote_sh.html`) instead of the original window
+    // (`remote.html`). Same reason the connection manager is spawned with `--ui`
+    // (see `server/connection.rs`), and why `common::UI_MODE` is per-process.
+    if crate::common::is_ui_mode() {
+        args.push("--ui".to_owned());
+    }
     if force_relay {
         args.push("".to_string()); // password
         args.push("--relay".to_string());

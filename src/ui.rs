@@ -268,7 +268,14 @@ pub fn start(args: &mut [String]) {
             }
             Box::new(handler)
         });
-        page = "remote.html";
+        // Which skin this window draws is decided the same way the connection manager's
+        // is: an explicit `--ui` keeps the original page, anything else gets the skin the
+        // enterprise build uses. See the `--cm` branch above and `src/ui/remote_sh.tis`.
+        page = if crate::common::is_ui_mode() {
+            "remote.html"
+        } else {
+            "remote_sh.html"
+        };
     } else {
         log::error!("Wrong command: {:?}", args);
         return;
@@ -281,6 +288,8 @@ pub fn start(args: &mut [String]) {
             inline::get_cm()
         } else if page == "cm_sh.html" {
             inline::get_cm_sh()
+        } else if page == "remote_sh.html" {
+            inline::get_remote_sh()
         } else if page == "install.html" {
             inline::get_install()
         } else {

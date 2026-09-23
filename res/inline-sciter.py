@@ -40,6 +40,21 @@ cm_sh = open('src/ui/cm_sh.html').read() \
     .replace('@import url(cm_sh.css);', open('src/ui/cm_sh.css').read()) \
     .replace('include "cm_sh.tis";', open('src/ui/cm_sh.tis').read())
 
+# The remote window in the skin the enterprise build opens by default. No style sheet of
+# its own - the toolbar row shares `remote.css` with the original window - but a toolbar of
+# its own: `header_sh.tis`. See `remote_sh.tis` for what the skin changes.
+remote_sh = open('src/ui/remote_sh.html').read() \
+    .replace('@import url(remote.css);', open('src/ui/remote.css').read()) \
+    .replace('@import url(header.css);', open('src/ui/header.css').read()) \
+    .replace('@import url(file_transfer.css);', open('src/ui/file_transfer.css').read()) \
+    .replace('include "remote_sh.tis";', open('src/ui/remote_sh.tis').read()) \
+    .replace('include "msgbox.tis";', open('src/ui/msgbox.tis').read()) \
+    .replace('include "grid.tis";', open('src/ui/grid.tis').read()) \
+    .replace('include "header_sh.tis";', open('src/ui/header_sh.tis').read()) \
+    .replace('include "file_transfer.tis";', open('src/ui/file_transfer.tis').read()) \
+    .replace('include "port_forward.tis";', open('src/ui/port_forward.tis').read()) \
+    .replace('include "printer.tis";', open('src/ui/printer.tis').read())
+
 
 def compress(s):
     s = s.replace("\r\n", "\n")
@@ -57,6 +72,7 @@ with open('src/ui/inline.rs', 'wt') as fh:
     fh.write('const _INSTALL: ' + compress(strip(install)) + ';\n')
     fh.write('const _CONNECTION_MANAGER: ' + compress(strip(cm)) + ';\n')
     fh.write('const _CM_SH: ' + compress(strip(cm_sh)) + ';\n')
+    fh.write('const _REMOTE_SH: ' + compress(strip(remote_sh)) + ';\n')
     fh.write('''
 fn get(data: &[u8]) -> String {
     String::from_utf8_lossy(data).to_string()
@@ -90,5 +106,9 @@ pub fn get_cm() -> String {
 #[inline]
 pub fn get_cm_sh() -> String {
     replace(&_CM_SH[..])
+}
+#[inline]
+pub fn get_remote_sh() -> String {
+    replace(&_REMOTE_SH[..])
 }
 ''')

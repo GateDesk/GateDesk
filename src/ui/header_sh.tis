@@ -1,3 +1,14 @@
+// Toolbar of the remote window in the skin the headless form uses.
+//
+// This is a copy of the original toolbar, `header.tis`, kept apart from it so that the
+// original stays exactly as upstream has it. Compared with the original it draws no chat
+// icon (nor is there a window for `newMessage` to raise), drops the quality monitor from
+// the display menu, and keeps only "Transfer file" in the action menu. Recording, the
+// keyboard modes and the rest of the display menu are untouched.
+//
+// It belongs to `remote_sh.html`; that page and `remote.html` implement the same handler
+// interface (see src/ui/remote.rs), so the Rust side needs nothing page-specific.
+
 var pi = handler.get_default_pi(); // peer information
 var chat_msgs = [];
 
@@ -147,7 +158,6 @@ class Header: Reactor.Component {
                 <div style="flow:horizontal;border-spacing: 0.5em;">{screens}</div>
                 {this.renderGlobalScreens()}
             </div>
-            <span #chat>{svg_chat}</span>
             <span #action>{svg_action}</span>
             <span #display>{svg_display}</span>
             <span #keyboard>{svg_keyboard}</span>
@@ -213,7 +223,6 @@ class Header: Reactor.Component {
                 {!cursor_embedded && <li #show-remote-cursor .toggle-option><span>{svg_checkmark}</span>{translate('Show remote cursor')}</li>}
                 {<li #follow-remote-cursor .toggle-option><span>{svg_checkmark}</span>{translate('Follow remote cursor')}</li>}
                 {<li #follow-remote-window .toggle-option><span>{svg_checkmark}</span>{translate('Follow remote window focus')}</li>}
-                <li #show-quality-monitor .toggle-option><span>{svg_checkmark}</span>{translate('Show quality monitor')}</li> 
                 {audio_enabled ? <li #disable-audio .toggle-option><span>{svg_checkmark}</span>{translate('Mute')}</li> : ""}
                 {is_file_copy_paste_supported && file_enabled ? <li #enable-file-copy-paste .toggle-option><span>{svg_checkmark}</span>{translate('Enable file copy and paste')}</li> : ""}
                 {keyboard_enabled && clipboard_enabled ? <li #disable-clipboard .toggle-option><span>{svg_checkmark}</span>{translate('Disable clipboard')}</li> : ""} 
@@ -226,20 +235,13 @@ class Header: Reactor.Component {
     }
 
     function renderActionPop() {
+        // This skin keeps one entry in the action menu: moving files is the only one of
+        // these the operator console has a button for. The rest are either the peer's own
+        // business (OS password, lock, restart, block input) or diagnostics (screenshot,
+        // refresh, TCP tunneling, the note that only matters when an audit server is set).
         return <popup>
             <menu.context #action-options>
-                {keyboard_enabled ? <li #os-password>{translate('OS Password')}<EditOsPassword /></li> : ""}
-                <li #transfer-file>{translate('Transfer file')}</li> 
-                <li #tunnel>{translate('TCP tunneling')}</li> 
-                {handler.get_audit_server("conn") && <li #note>{translate('Note')}</li>}
-                {!handler.is_control_granted() ? <li #request-control>{translate('Request control')}</li> : ""}
-                <div .separator />
-                {keyboard_enabled && (pi.platform == "Linux" || pi.sas_enabled) ? <li #ctrl-alt-del>{translate('Insert')} Ctrl + Alt + Del</li> : ""}
-                {restart_enabled && (pi.platform == "Linux" || pi.platform == "Windows" || pi.platform == "Mac OS") ? <li #restart_remote_device>{translate('Restart remote device')}</li> : ""}
-                {keyboard_enabled ? <li #lock-screen>{translate('Insert Lock')}</li> : ""}
-                {keyboard_enabled && pi.platform == "Windows" && pi.sas_enabled ? <li #block-input>{translate("Block user input")}</li> : ""}
-                {handler.is_screenshot_supported() ? <li #take-screenshot>{translate('Take screenshot')}</li> : "" }
-                <li #refresh>{translate('Refresh')}</li>
+                <li #transfer-file>{translate('Transfer file')}</li>
             </menu>
         </popup>;
     }
@@ -678,8 +680,9 @@ view.on("size", function() {
 });
 
 handler.newMessage = function(text) {
+    // This skin draws no chat window, so an incoming message is only recorded; the
+    // original toolbar raises it with `startChat`.
     chat_msgs.push({text: text, name: pi.username || "", time: getNowStr()});
-    startChat();
 }
 
 function sendMsg(text) {

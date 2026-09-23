@@ -230,6 +230,17 @@ target/release/rustdesk
 
 Please ensure that you run these commands from the root of the RustDesk repository, or the application may not find the required resources. Also note that other cargo subcommands such as `install` or `run` are not currently supported via this method as they would install or run the program inside the container instead of the host.
 
+## File copy and paste
+
+Copying **files** through the clipboard is a different channel from the file transfer window, and it is off unless two gates are both open:
+
+- **Build gate (controlled side)** — the machine being controlled has to be built with `unix-file-copy-paste`. Without that feature the controlled side does not advertise `has_file_clipboard` in its login additions at all, so the controlling side's session menu never shows "Enable file copy and paste" (`src/ui/header.tis` requires both its own and the peer's `has_file_clipboard`). The one combination that does not need the feature is Windows ↔ Windows.
+  - macOS build: `./build.py --flutter --hwcodec --unix-file-copy-paste`, or for the Sciter build `cargo build --locked --release --features inline,unix-file-copy-paste`.
+  - macOS as the *controlling* side against a Windows peer needs the **Windows** build to carry the feature too. Upstream never ships that, so treat it as untested.
+- **Session gate (controlling side)** — "Enable file copy and paste" in the session menu has to be turned on. It is the local option `enable-file-copy-paste` in `GateDesk_local.toml` and is off by default; only then does the controlling side send `OptionMessage.enable_file_transfer = Yes`, which is what makes `file_transfer_enabled()` true on the controlled side and gives the file clipboard service a reason to subscribe.
+
+The text clipboard is not affected by either gate, and the file transfer window only needs the `file` permission, so both keep working when file copy and paste does not. The API side of the two gates is written up in `GateDesk-api.md` §6.7.4.
+
 ## File Structure
 
 - **[libs/hbb_common](https://github.com/rustdesk/rustdesk/tree/master/libs/hbb_common)**: video codec, config, tcp/udp wrapper, protobuf, fs functions for file transfer, and some other utility functions

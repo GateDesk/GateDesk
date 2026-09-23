@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.20（2026-09-21）
+> 版本：1.21（2026-09-23）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -443,6 +443,10 @@ curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"n
 - 运维设置 `enable-perm-change-in-accept-window = N`（锁定权限）时，本接口除 `keyboard` 外一律 409。这道锁也管着 §6.9 里命名权限的应答（`respond_control_request` 自己会检查），但管不住 `keyboard`：`keyboard` 在门口因 `name != "keyboard"` 免于 409，而 §6.7.3 应答键鼠申请走的路径（`resolve_control_request`）根本不经过 `switch_permission`。把 `keyboard` 排除在外是有意的，它是 `--ui` 形态下现场唯一的放行入口，但运维需要知道：锁定权限锁不住键鼠。
 - 打开 `keyboard` 就是授权控制：本机用户点开键盘图标，或用本接口打开 `keyboard`，与 §6.7.3 应答一次键鼠申请等价，三者都写同一个闸门；关掉 `keyboard` 则收回控制，会话退回只读。差别只在由谁来点，闸门本身只有一处。
   - 所以 `--ui` 那条路径不需要提示：原始 CM 窗口没有「对端申请控制」的提示条，对端开口只是让服务端记下一个 60 秒的待办，现场的人在窗口上点键盘图标即可放行；没有人点就按超时拒绝处理。
+- **`file` 与另外三项不同**：它打开的是**文件通道**（`enable_file_transfer`），不等于「复制粘贴文件」可用。想真的复制粘贴文件，另外还有**两道闸**，两道都成立才通：
+  1. **构建闸（被控端）**：被控端必须是带 `unix-file-copy-paste` 编出来的构建。不带该 feature 时，被控端登录时的附加信息里根本没有 `has_file_clipboard` 字段，控制端会话菜单里连「允许复制粘贴文件」这一项都不会出现（`src/ui/header.tis` 要求本端与对端两个 `has_file_clipboard` 同时为真）。唯一不需要该 feature 的组合是**两端同为 Windows**（`is_both_windows`）；构建命令见 `README.md` 的「File copy and paste」一节。
+  2. **会话闸（控制端）**：控制端的「允许复制粘贴文件」要处于打开状态。它是控制端**按对端保存的会话选项**（`ClientConfig`），写在 `config/peers/<对端设备 ID>.toml`，键名 `enable-file-copy-paste`，**不是** `GateDesk2.toml` 的 `[options]`（附录 A 与本接口都不涉及它）；菜单里拨一下即落盘。该键不存在时取默认值：`UserDefaultConfig` 对这个键的兜底是 `'Y'`，即**默认开**；要关就写 `config/GateDesk_default.toml` 的 `[options] enable-file-copy-paste = 'N'`（定制客户端的 default/override 设置也在这个位置生效）。本机实例：`peers/419984805.toml` 里为 `true`。打开后控制端才发 `OptionMessage.enable_file_transfer = Yes`，被控端的 `file_transfer_enabled()` 才为真，文件剪贴板服务也才有订阅条件。
+  - 文本剪贴板（`clipboard`）不受这两道闸影响；「文件传输」窗口走的是文件通道本身，也不受影响。
 
 **审计**：`permission.change`（见 §6.8），`extra` 为 `{peer_id, name, enabled}`。
 
@@ -559,6 +563,8 @@ curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id
 | 结果可见性 | 对端同意后发 `Permission::Keyboard`，控制端立刻能看出只读解开 | 没有回执，只能从通道是否真的可用反推（剪贴板能不能用、有没有声音） |
 | 审计（记在受控端） | `control.approve` / `control.deny` / `control.timeout` | 允许 → `permission.change`（`extra.name` 带权限名，`extra.enabled` 为 `true`）；超时 → `control.timeout`；请求本身不记事件 |
 | 结果怎么判 | 受控端同意后会发一个明确的「键盘开了」信号，控制端据此解开只读 | 只能从通道真的能用反推；受控端那台机器自己的集成可以读 §6.7.1 |
+
+> ⚠️ 表里 `clipboard` / `audio` / `file` 三项是并列写的，但 `file` 多一层：它打开的是文件通道，「复制粘贴文件」能不能用还取决于被控端的构建 feature 与控制端的 `enable-file-copy-paste` 开关（两道闸，见 §6.7.4 边界）。文本剪贴板没有这两个额外条件。
 
 **错误**
 
@@ -793,6 +799,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-23 | 1.21 | 补充「文件复制粘贴」的**两道闸**（仅文档，无接口变更）：§6.7.4 边界新增一条 —— `file` 打开的是文件通道，复制粘贴文件还要求（1）被控端带 `unix-file-copy-paste` 编译，否则登录附加信息里不上报 `has_file_clipboard`，控制端会话菜单里连「允许复制粘贴文件」都不出现（两端同为 Windows 是唯一例外）；（2）控制端的会话选项 `enable-file-copy-paste` 要打开 —— 它按对端存于 `config/peers/<对端ID>.toml`（`ClientConfig`），不是 `GateDesk2.toml` 的 `[options]`，缺省为开（`GateDesk_default.toml` 可关）。§6.9 差异表后加一条指向说明 |
 | 2026-09-21 | 1.20 | 落地 §6.10 出站事件通知。上报侧新增 `GateDesk/src/event.rs`，用独立的配置键、队列和线程，不重试、无本地兜底、每次投递 3 秒上限；连接层四个点发出 `login.pending` / `control.pending` / `session.open` / `session.close`。接收侧 `GateDeskWeb` 新增 `POST /api/event` 并广播给页面，两个页面收到后立即拉 `/sessions`，兜底轮询在收到过事件之后由 2 秒放到 30 秒。`session.close` 的 `extra` 增加 `reason`。§6.7 各接口的「干什么」标签统一改为「作用」，§6.7.4 与 §8.1 措辞整理。附带修掉 `employee.html` 里仍在调用已删除的 `POST /voice` 的语音按钮，改为按会话调 `POST /permission {"name":"audio"}` |
 | 2026-09-21 | 1.19 | 新增 §6.10 出站事件通知的设计与契约（当时尚未实现），§8.1 增加事件驱动这条发现路径。同时修正四处与实现不符：§1 角色表把 `/password` 归到控制端（它设的是本机密码，属于被控端，改为独立一行）、§1 端点清单还留着已删除的 `/voice`、§6.9 差异表写 `extra.permission` 而实际字段是 `extra.name`、头部维护约定与 §1 的源码路径写成小写 `gatedesk/`。补充 §6.7.4 的三点：`/permission` 没有「必须有在途申请」这个前提、`enable-perm-change-in-accept-window = N` 锁不住 `keyboard`、`permission.change` 的 `actor` 恒为 `customer` |
 | 2026-09-21 | 1.18 | **删除 `POST /voice`**（原 §6.6，编号留空）：音频权限用 `POST /permission {"name":"audio"}` 按会话开关就够，批量端点省不掉那次 `/sessions` 查询，却多一套「一次改所有本机会话」的粗放语义和一条独立的审计路径。§6.5、§6.8、§7 里与它相关的说法一并去掉；`audio-input` 的历史污染清理（启动时清掉旧版写入的 `Y`）保留 |
