@@ -745,9 +745,9 @@ recordings/<device_id>/<session_id>/<录像文件名>
 
 服务端不删录像，保留策略在客户端。
 
-#### 本机保留 7 天
+#### 本机保留 3 天
 
-上传成功后在录像旁写一个 `<文件名>.uploaded`，内容是上传时间戳。定制皮肤每次启动扫一遍录像目录，把带标记、且标记时间超过 7 天的录像连同标记一起删掉。没有标记的文件不动，包括从没传成功的和用原版皮肤手动录的。
+上传成功后在录像旁写一个 `<文件名>.uploaded`，内容是上传时间戳。定制皮肤每次启动扫一遍录像目录，把带标记、且标记时间超过 3 天的录像连同标记一起删掉。没有标记的文件不动，包括从没传成功的和用原版皮肤手动录的。
 
 #### 配置与查看
 
@@ -904,7 +904,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
-| 2026-09-23 | 1.22 | 新增 §6.11 会话录像上传：由本 API `POST /connect` 发起的会话**自动录屏**，会话结束后把录像文件传到审计服务端 —— 上传地址由 `audit-server-url` 的源派生 `/api/record`，不新增地址配置键。协议沿用上游 rustdesk 的 `type=new/part/tail/remove` + raw body 分片；每个请求重试 3 次，失败放弃不重传，成功记 `record.upload.done`、失败记 `record.upload.fail`。本机文件在上传成功后保留 **7 天**，靠 `<文件名>.uploaded` 标记清理，未上传成功的不动。新增配置 `record-upload-mode`（`chunked` 默认 / `whole`）。客户端实现 `GateDesk/src/record_upload.rs`；接收端为 `GateDeskWeb` 的 `POST /api/record`，落在 `recordings/<device_id>/<session_id>/`。§6.11 另写明录像在本机与服务端的**存放位置**（分平台）、文件名与格式、查看命令 |
+| 2026-09-23 | 1.22 | 新增 §6.11 会话录像上传：由本 API `POST /connect` 发起的会话**自动录屏**，会话结束后把录像文件传到审计服务端 —— 上传地址由 `audit-server-url` 的源派生 `/api/record`，不新增地址配置键。协议沿用上游 rustdesk 的 `type=new/part/tail/remove` + raw body 分片；每个请求重试 3 次，失败放弃不重传，成功记 `record.upload.done`、失败记 `record.upload.fail`。本机文件在上传成功后保留 **3 天**，靠 `<文件名>.uploaded` 标记清理，未上传成功的不动。新增配置 `record-upload-mode`（`chunked` 默认 / `whole`）。客户端实现 `GateDesk/src/record_upload.rs`；接收端为 `GateDeskWeb` 的 `POST /api/record`，落在 `recordings/<device_id>/<session_id>/`。§6.11 另写明录像在本机与服务端的**存放位置**（分平台）、文件名与格式、查看命令 |
 | 2026-09-23 | 1.21 | 补充「文件复制粘贴」的**两道闸**（仅文档，无接口变更）：§6.7.4 边界新增一条 —— `file` 打开的是文件通道，复制粘贴文件还要求（1）被控端带 `unix-file-copy-paste` 编译，否则登录附加信息里不上报 `has_file_clipboard`，控制端会话菜单里连「允许复制粘贴文件」都不出现（两端同为 Windows 是唯一例外）；（2）控制端的会话选项 `enable-file-copy-paste` 要打开 —— 它按对端存于 `config/peers/<对端ID>.toml`（`ClientConfig`），不是 `GateDesk2.toml` 的 `[options]`，缺省为开（`GateDesk_default.toml` 可关）。§6.9 差异表后加一条指向说明 |
 | 2026-09-21 | 1.20 | 落地 §6.10 出站事件通知。上报侧新增 `GateDesk/src/event.rs`，用独立的配置键、队列和线程，不重试、无本地兜底、每次投递 3 秒上限；连接层四个点发出 `login.pending` / `control.pending` / `session.open` / `session.close`。接收侧 `GateDeskWeb` 新增 `POST /api/event` 并广播给页面，两个页面收到后立即拉 `/sessions`，兜底轮询在收到过事件之后由 2 秒放到 30 秒。`session.close` 的 `extra` 增加 `reason`。§6.7 各接口的「干什么」标签统一改为「作用」，§6.7.4 与 §8.1 措辞整理。附带修掉 `employee.html` 里仍在调用已删除的 `POST /voice` 的语音按钮，改为按会话调 `POST /permission {"name":"audio"}` |
 | 2026-09-21 | 1.19 | 新增 §6.10 出站事件通知的设计与契约（当时尚未实现），§8.1 增加事件驱动这条发现路径。同时修正四处与实现不符：§1 角色表把 `/password` 归到控制端（它设的是本机密码，属于被控端，改为独立一行）、§1 端点清单还留着已删除的 `/voice`、§6.9 差异表写 `extra.permission` 而实际字段是 `extra.name`、头部维护约定与 §1 的源码路径写成小写 `gatedesk/`。补充 §6.7.4 的三点：`/permission` 没有「必须有在途申请」这个前提、`enable-perm-change-in-accept-window = N` 锁不住 `keyboard`、`permission.change` 的 `actor` 恒为 `customer` |

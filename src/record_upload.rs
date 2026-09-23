@@ -54,7 +54,7 @@ const MAX_HEADER_LEN: usize = 1024;
 const UPLOADED_SUFFIX: &str = ".uploaded";
 
 /// How long an uploaded recording is kept on this machine before [`cleanup`] removes it.
-const KEEP_UPLOADED_DAYS: u64 = 7;
+const KEEP_UPLOADED_DAYS: u64 = 3;
 
 fn is_chunked() -> bool {
     Config::get_option(OPTION_RECORD_UPLOAD_MODE) != "whole"
