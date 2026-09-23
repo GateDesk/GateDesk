@@ -22,6 +22,109 @@ pub fn start_tray() {
     allow_err!(make_tray());
 }
 
+/// The size the notification area asks for. Reading it beats hard-coding 16, and it is what
+/// the tray scales to anyway.
+#[cfg(windows)]
+fn small_icon_size() -> (u32, u32) {
+    use winapi::um::winuser::{GetSystemMetrics, SM_CXSMICON, SM_CYSMICON};
+    let (w, h) = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
+    (
+        if w > 0 { w as u32 } else { 16 },
+        if h > 0 { h as u32 } else { 16 },
+    )
+}
+
+/// Build the tray icon the way Windows expects it, instead of going through
+/// `tray_icon::Icon::from_rgba`.
+///
+/// That one ends in `CreateIcon`, which builds a DDB: a bitmap with no alpha channel, where
+/// transparency can only be expressed by the 1bpp mask. Windows 10 and 11 composite the
+/// tray icon by its alpha regardless, so it looks right there - but the Windows 7 tray does
+/// not, and the fully transparent pixels (black, alpha 0) come out as a black square.
+///
+/// A 32bpp DIB carrying the alpha, handed over with `CreateIconIndirect`, is what every
+/// Windows since Vista actually wants. `tray-icon` takes ownership of the handle and
+/// destroys it when the icon is dropped.
+#[cfg(windows)]
+fn windows_icon_from_rgba(
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+) -> hbb_common::ResultType<tray_icon::Icon> {
+    use std::ptr;
+    use winapi::shared::minwindef::DWORD;
+    use winapi::um::wingdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BI_RGB, DIB_RGB_COLORS,
+    };
+    use winapi::um::winuser::{CreateIconIndirect, ICONINFO};
+
+    let (w, h) = (width as i32, height as i32);
+    if w <= 0 || h <= 0 || rgba.len() < width as usize * height as usize * 4 {
+        hbb_common::bail!("icon data is not {width}x{height}");
+    }
+    unsafe {
+        // Top-down (negative height) so the rows arrive in the same order as `rgba`.
+        let mut bmi: BITMAPINFO = std::mem::zeroed();
+        bmi.bmiHeader.biSize = std::mem::size_of_val(&bmi.bmiHeader) as DWORD;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        let mut bits: *mut winapi::ctypes::c_void = ptr::null_mut();
+        let color = CreateDIBSection(
+            ptr::null_mut(),
+            &bmi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            ptr::null_mut(),
+            0,
+        );
+        if color.is_null() {
+            hbb_common::bail!(
+                "CreateDIBSection failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        if !bits.is_null() {
+            let dst = std::slice::from_raw_parts_mut(bits as *mut u8, rgba.len());
+            for (px, out) in rgba.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                out[0] = px[2];
+                out[1] = px[1];
+                out[2] = px[0];
+                out[3] = px[3];
+            }
+        }
+        // All zeroes, which tells the shell to take the alpha from the colour bitmap.
+        // `CreateBitmap` with a null pointer leaves the bits undefined, so pass ours.
+        let stride = (width.div_ceil(32) * 4) as usize;
+        let mask_bits = vec![0u8; stride * height as usize];
+        let mask = CreateBitmap(w, h, 1, 1, mask_bits.as_ptr() as *const _);
+        if mask.is_null() {
+            DeleteObject(color as _);
+            hbb_common::bail!("CreateBitmap failed: {}", std::io::Error::last_os_error());
+        }
+        let mut info = ICONINFO {
+            fIcon: 1,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        };
+        let hicon = CreateIconIndirect(&mut info);
+        // The icon owns its copies of both bitmaps now.
+        DeleteObject(mask as _);
+        DeleteObject(color as _);
+        if hicon.is_null() {
+            hbb_common::bail!(
+                "CreateIconIndirect failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(tray_icon::Icon::from_handle(hicon as isize))
+    }
+}
+
 fn make_tray() -> hbb_common::ResultType<()> {
     // https://github.com/tauri-apps/tray-icon/blob/dev/examples/tao.rs
     use hbb_common::anyhow::Context;
@@ -53,10 +156,25 @@ fn make_tray() -> hbb_common::ResultType<()> {
         let image = load_icon_from_asset()
             .unwrap_or(image::load_from_memory(icon).context("Failed to open icon path")?)
             .into_rgba8();
+        #[cfg(windows)]
+        // Hand the tray the size it asks for. The .ico holds a much larger image, and
+        // Windows 7's own downscaling is part of what went wrong there.
+        let image = {
+            let (w, h) = small_icon_size();
+            if image.width() == w && image.height() == h {
+                image
+            } else {
+                image::imageops::resize(&image, w, h, image::imageops::FilterType::Triangle)
+            }
+        };
         let (width, height) = image.dimensions();
         let rgba = image.into_raw();
         (rgba, width, height)
     };
+    #[cfg(windows)]
+    let icon = windows_icon_from_rgba(icon_rgba, icon_width, icon_height)
+        .context("Failed to build the tray icon")?;
+    #[cfg(not(windows))]
     let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 
