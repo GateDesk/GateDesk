@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.27（2026-09-24）
+> 版本：1.28（2026-09-24）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -324,16 +324,26 @@ GET /sessions
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | id | int | 会话标识，其余接口用它寻址 |
-| authorized | bool | 是否已放行；`false` 且 `disconnected: false` 即**正在请求接入**（用 §6.7.2 决定） |
-| disconnected | bool | 会话是否已结束（仍留在列表里，可用 §6.7.6 清掉） |
-| pending_control | bool | 是否有**待应答的申请**（对应界面上的「允许 / 拒绝」提示）。申请有两种，见下一行 |
-| pending_permission | string | 待应答的申请要的是哪一项：`clipboard` / `audio` / `file`；**空字符串表示要的是键鼠控制**。`pending_control` 为 `false` 时它无意义 |
-| keyboard | bool | 对端当前能不能驱动本机键鼠：权限与会话批准两样都成立才为 `true`，即控制层 `peer_input_enabled()` 的值，与连接管理器界面上键盘那一行是同一个值（v1.14） |
+| authorized | bool | 是否已放行；`false` 且 `disconnected: false` 即正在请求接入（用 §6.7.2 决定） |
+| disconnected | bool | 会话是否已结束（条目仍在列表里，可用 §6.7.6 清掉） |
+| pending_control | bool | 是否有待应答的申请（界面上的「允许 / 拒绝」提示）。申请有两种，见下一行 |
+| pending_permission | string | 待应答的是哪一项：`clipboard` / `audio` / `file`；空字符串表示键鼠控制。`pending_control` 为 `false` 时无意义 |
+| is_file_transfer | bool | 该会话是文件传输窗口，不是远程桌面 |
+| is_view_camera | bool | 摄像头会话 |
+| is_terminal | bool | 终端会话 |
+| port_forward | string | 端口转发地址；非端口转发会话为空串 |
 | peer_id | string | 对端设备 ID |
 | name | string | 对端名称 |
-| other fields | — | 各项权限的当前值，与界面上的开关一一对应 |
+| avatar | string | 对端头像，无则空串 |
+| keyboard | bool | 对端当前能否驱动本机键鼠，即 `peer_input_enabled()`，与界面上键盘那一行同值（v1.14） |
+| clipboard / audio / file | bool | 三项权限的当前值，与界面开关一一对应 |
+| restart / block_input / privacy_mode | bool | 上游三项开关的当前值；定制界面（`cm_sh.tis`）不画它们，`--ui` 的原始窗口可切 |
+| recording | bool | 是否在录制会话；GateDesk 随会话默认录制，不是可切换项 |
+| from_switch | bool | 会话来自「切换控制方向」（Flutter 版功能），Sciter 版恒为 `false` |
+| in_voice_call | bool | 本会话正在语音通话 |
+| incoming_voice_call | bool | 有对端来电待接 |
 
-**什么时候会失败**：token 缺失或不符 → 401；连接管理器 2 秒没回应 → 504。**连接管理器不在时返回空数组**（v1.27）：本接口问的是「有哪些会话」，而连接管理器在最后一个会话结束时自行退出（`quit_gui`），空闲机器上它本来就不在，此时回 `{"ok":true,"sessions":[]}` 而不是 503——轮询方不必再猜这一轮到底是没会话还是服务没起来。只要它在监听就返回数组：一个会话都没有时是 `[]`，会话刚结束但条目还没清掉时，那些条目仍会出现（`disconnected: true`）。本接口不接受 `id` 参数，因此不会返回 404。
+**什么时候会失败**：token 缺失或不符 → 401；连接管理器 2 秒没回应 → 504。连接管理器不在时返回空数组（v1.27）——它在最后一个会话结束时自行退出，空闲机器上本来就不在。会话刚结束但条目还没清掉的仍会出现（`disconnected: true`）。本接口不接受 `id`，不会返回 404。
 
 #### 6.7.2 批准或拒绝接入
 
@@ -375,7 +385,7 @@ POST /control
 
 - `name` 为 `keyboard`：对端要的是**键鼠控制**。`accept: true` 交出控制，会话从只读变成可操作；`false` 拒绝，会话保持只读。
 
-  交出控制含两件事：会话控制闸门打开，**以及本机的 `keyboard` 权限一并打开**——与在界面上点键盘开关、或调 §6.7.4 的 `POST /permission {"name":"keyboard"}` 是同一个结果。`GET /sessions` 的 `keyboard` 字段就是这两样的积，只有两样都成立对端才真能敲进键来。v1.25 之前 `accept: true` 只做前一件：若该会话的 `keyboard` 权限此前被关过（人点过开关，或调过 §6.7.4），接受申请后对端仍然一个键也敲不进来，而审计里已经躺着一条 `control.approve`。命名权限（`clipboard` / `audio` / `file`）没有这个问题：那条路在连接管理器侧会替本机用户调一次开关。
+  交出控制含两件事：打开会话控制闸门，**并把本机的 `keyboard` 权限一并打开**——与点界面上的键盘开关、或调 §6.7.4 是同一结果。`/sessions` 的 `keyboard` 就是这两样的积。v1.25 之前只做前一件：`keyboard` 权限此前被关过时，接受申请后对端仍一个键也敲不进来，而审计里已经记了一条 `control.approve`。
 - `name` 为 `clipboard` / `audio` / `file`：对端要的是那一项权限。`accept: true` 时本机替本机用户把那项权限打开（与 §6.7.4 是同一批动作），`false` 则什么也不变。
 
 `name` 是**必填**，而且必须与在途那项一致：本接口不再“应答在途的那一项”，因为调用方读的 `/sessions` 可能是旧的，届时一句 `accept: true` 会替本机用户打开一个它没想开的通道。要知道在途的是哪一项，读 `/sessions` 的 `pending_permission`（空字符串=键鼠，对应本接口的 `name: "keyboard"`）——两边名字就照这个对应关系写。
@@ -924,6 +934,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-24 | 1.28 | `GET /sessions` 字段表补全（仅文档）：此前 `is_file_transfer` / `is_view_camera` / `is_terminal` / `port_forward` / `avatar` / `recording` / `from_switch` / `in_voice_call` / `incoming_voice_call` 等挤在一行「other fields」里没有说明；顺带精简 §6.7.1、§6.7.3 的措辞 |
 | 2026-09-24 | 1.27 | **`GET /sessions` 在没有连接管理器时返回空数组**（§6.7.1）：此前回 503，而连接管理器在最后一个会话结束时会自行退出（`quit_gui`，界面上关掉最后一个卡片也走同一条路），于是空闲机器上每轮轮询都收到 503，调用方分不清「没有会话」和「服务没起来」。现在只有 `/sessions` 把「没有管理器」读作「没有会话」，回 `{"ok":true,"sessions":[]}`；其余接口维持 503，它们要的是管理器本身 |
 | 2026-09-24 | 1.26 | 文档补漏（无接口变更）：**每个接口的参数表加上 `token` 行**，§6.7 的错误码规律补上 `401`。token 此前只在 §2「安全要求」与 §4「鉴权方式」里说明、只出现在各节的 curl 示例里，单独看某一节的参数表（尤其 `GET /sessions` 这种没有业务参数的）会以为不必带；实现里 `handle()` 是**先校验 token 再分派**的，`/id`、`/sessions`、`/approve` 一个都不例外，缺失或不符一律 401 |
 | 2026-09-24 | 1.25 | **应答键鼠申请现在真能用了**（§6.7.3，无接口变更）：`accept: true` 此前只打开会话控制闸门（`control_authorized`），不动 `keyboard` 权限，而 `peer_input_enabled()` 是这两样的积 —— 于是当该会话的 `keyboard` 权限被关过时，接受申请后对端依旧一个键也敲不进来，`cm_sh` 上的键盘行也不亮，可审计里已经记了一条 `control.approve`，读日志的人会以为键鼠交出去了。现在 `resolve_control_request` 在同意时一并把 `keyboard` 权限打开，与点界面开关、`/permission {"name":"keyboard"}` 走到同一结果（记录、审计、窗口那一行三处一致）|
