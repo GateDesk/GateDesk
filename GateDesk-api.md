@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.28（2026-09-24）
+> 版本：1.29（2026-09-24）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -227,7 +227,7 @@ POST /password
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: application/json" -d '{\"password\":\"mypass\"}'
+curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: application/json" -d '{"password":"mypass"}'
 ```
 
 **成功响应（200）**
@@ -362,7 +362,7 @@ POST /approve
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":3,\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d '{"id":3,"accept":true}'
 ```
 
 **成功响应（200）**
@@ -400,7 +400,7 @@ POST /control
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":3,\"name\":\"keyboard\",\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d '{"id":3,"name":"keyboard","accept":true}'
 ```
 
 **成功响应（200）**：`result` 回显应答的那一项，便于调用方核对
@@ -435,7 +435,7 @@ POST /permission
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":3,\"name\":\"clipboard\",\"enabled\":true}"
+curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d '{"id":3,"name":"clipboard","enabled":true}'
 ```
 
 **成功响应（200）**
@@ -488,7 +488,7 @@ POST /terminate
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d "{\"id\":3}"
+curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d '{"id":3}'
 ```
 
 **成功响应（200）**
@@ -555,9 +555,9 @@ POST /request-permission
 
 ```powershell
 # 键鼠控制
-curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"123456789\",\"name\":\"keyboard\"}"
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d '{"id":"123456789","name":"keyboard"}'
 # 剪贴板（audio / file 同理）
-curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"123456789\",\"name\":\"clipboard\"}"
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d '{"id":"123456789","name":"clipboard"}'
 ```
 
 **成功响应（200）**
@@ -894,28 +894,28 @@ curl -s -o NUL -w "%{http_code}" -H "Origin: http://evil.example" "http://127.0.
 # 列出会话（无会话且面板窗口已退出 → 503；面板窗口还在 → 200 且 sessions 为 []）
 curl "http://127.0.0.1:21120/sessions?token=<token>"
 # 批准接入（把 <id> 换成 /sessions 返回的 id）→ 200，面板上对应卡片消失
-curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d '{"id":<id>,"accept":true}'
 # 允许控制 → 200，会话面板上的「允许/拒绝」提示同步消失（name 必填且要与在途的那项一致）
-curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"keyboard\",\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d '{"id":<id>,"name":"keyboard","accept":true}'
 # 应答一项命名权限的申请 → 200，响应回显 name
-curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d '{"id":<id>,"name":"clipboard","accept":true}'
 # name 与在途那项不符 → 409，错误里写明在途的是哪一项
-curl -s -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"file\",\"accept\":true}"
+curl -s -X POST "http://127.0.0.1:21120/control?token=<token>" -d '{"id":<id>,"name":"file","accept":true}'
 # name 不在四个名字之内或缺失 → 400
-curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
+curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/control?token=<token>" -d '{"id":<id>,"accept":true}'
 # 开关权限 → 200，面板上对应开关同步变化
-curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"enabled\":true}"
+curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d '{"id":<id>,"name":"clipboard","enabled":true}'
 # 请求对端开启一项权限（v1.15 合并，控制端；<ID> 是本机已 /connect 的对端设备 ID）
 # → 200 只表示会话已受理；对端 GateDesk 会弹「同意 / 拒绝」，不点则什么也不变
-curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"<ID>\",\"name\":\"clipboard\"}"
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d '{"id":"<ID>","name":"clipboard"}'
 # 键鼠是四个名字之一
-curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"<ID>\",\"name\":\"keyboard\"}"
+curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d '{"id":"<ID>","name":"keyboard"}'
 # name 不在四个名字之内 → 400
-curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id\":\"<ID>\",\"name\":\"restart\"}"
+curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d '{"id":"<ID>","name":"restart"}'
 # 结束会话 → 200，对端断开且允许重连
-curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d "{\"id\":<id>}"
+curl -X POST "http://127.0.0.1:21120/terminate?token=<token>" -d '{"id":<id>}'
 # 清理已结束的会话 → 200
-curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d "{\"id\":<id>}"
+curl -X POST "http://127.0.0.1:21120/dismiss?token=<token>" -d '{"id":<id>}'
 # 状态不符 → 409（例：对同一个 id 重复 /approve）
 # 无会话管理器 → 503（例：本机当时没有任何会话）
 
@@ -934,6 +934,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-24 | 1.29 | 文档里 18 处 curl 的 JSON body 统一成 `-d '{"…"}'`（仅文档）：原 §6.5 写成 `-d '{\"…\"}'`，单引号内不做转义，反斜杠会原样发出去，body 不是合法 JSON，照抄必失败（400 `missing or invalid password`）；其余 17 处用双引号加转义，bash 可用，但 PowerShell 下同样会把反斜杠发出去。单引号写法两种 shell 都能直接粘贴 |
 | 2026-09-24 | 1.28 | `GET /sessions` 字段表补全（仅文档）：此前 `is_file_transfer` / `is_view_camera` / `is_terminal` / `port_forward` / `avatar` / `recording` / `from_switch` / `in_voice_call` / `incoming_voice_call` 等挤在一行「other fields」里没有说明；顺带精简 §6.7.1、§6.7.3 的措辞 |
 | 2026-09-24 | 1.27 | **`GET /sessions` 在没有连接管理器时返回空数组**（§6.7.1）：此前回 503，而连接管理器在最后一个会话结束时会自行退出（`quit_gui`，界面上关掉最后一个卡片也走同一条路），于是空闲机器上每轮轮询都收到 503，调用方分不清「没有会话」和「服务没起来」。现在只有 `/sessions` 把「没有管理器」读作「没有会话」，回 `{"ok":true,"sessions":[]}`；其余接口维持 503，它们要的是管理器本身 |
 | 2026-09-24 | 1.26 | 文档补漏（无接口变更）：**每个接口的参数表加上 `token` 行**，§6.7 的错误码规律补上 `401`。token 此前只在 §2「安全要求」与 §4「鉴权方式」里说明、只出现在各节的 curl 示例里，单独看某一节的参数表（尤其 `GET /sessions` 这种没有业务参数的）会以为不必带；实现里 `handle()` 是**先校验 token 再分派**的，`/id`、`/sessions`、`/approve` 一个都不例外，缺失或不符一律 401 |
