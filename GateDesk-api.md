@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.24（2026-09-23）
+> 版本：1.25（2026-09-24）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -371,6 +371,8 @@ POST /control
 **作用**：应答对端发来的一项申请，由本机决定。`/sessions` 里 `pending_control: true` 时走这里。两种申请共用这一个入口，`name` 说的就是应答哪一项：
 
 - `name` 为 `keyboard`：对端要的是**键鼠控制**。`accept: true` 交出控制，会话从只读变成可操作；`false` 拒绝，会话保持只读。
+
+  交出控制含两件事：会话控制闸门打开，**以及本机的 `keyboard` 权限一并打开**——与在界面上点键盘开关、或调 §6.7.4 的 `POST /permission {"name":"keyboard"}` 是同一个结果。`GET /sessions` 的 `keyboard` 字段就是这两样的积，只有两样都成立对端才真能敲进键来。v1.25 之前 `accept: true` 只做前一件：若该会话的 `keyboard` 权限此前被关过（人点过开关，或调过 §6.7.4），接受申请后对端仍然一个键也敲不进来，而审计里已经躺着一条 `control.approve`。命名权限（`clipboard` / `audio` / `file`）没有这个问题：那条路在连接管理器侧会替本机用户调一次开关。
 - `name` 为 `clipboard` / `audio` / `file`：对端要的是那一项权限。`accept: true` 时本机替本机用户把那项权限打开（与 §6.7.4 是同一批动作），`false` 则什么也不变。
 
 `name` 是**必填**，而且必须与在途那项一致：本接口不再“应答在途的那一项”，因为调用方读的 `/sessions` 可能是旧的，届时一句 `accept: true` 会替本机用户打开一个它没想开的通道。要知道在途的是哪一项，读 `/sessions` 的 `pending_permission`（空字符串=键鼠，对应本接口的 `name: "keyboard"`）——两边名字就照这个对应关系写。
@@ -914,6 +916,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-24 | 1.25 | **应答键鼠申请现在真能用了**（§6.7.3，无接口变更）：`accept: true` 此前只打开会话控制闸门（`control_authorized`），不动 `keyboard` 权限，而 `peer_input_enabled()` 是这两样的积 —— 于是当该会话的 `keyboard` 权限被关过时，接受申请后对端依旧一个键也敲不进来，`cm_sh` 上的键盘行也不亮，可审计里已经记了一条 `control.approve`，读日志的人会以为键鼠交出去了。现在 `resolve_control_request` 在同意时一并把 `keyboard` 权限打开，与点界面开关、`/permission {"name":"keyboard"}` 走到同一结果（记录、审计、窗口那一行三处一致）|
 | 2026-09-23 | 1.24 | **`POST /control` 补上“应答的是哪一项”**（§6.7.3）：请求新增**必填** `name`（`keyboard` / `clipboard` / `audio` / `file`，与 `/request-permission` 同一套名字），必须与在途申请一致，不符 → 409 `the pending request is for …`；响应回显 `result.name`；审计 `control.approve` / `control.deny` 的 `extra` 从 `{peer_id}` 变为 `{peer_id, permission}`（空字符串=键鼠，与 `control.timeout` 一致）。此前本接口只认“在途的那一项”，调用方若拿着过期的 `/sessions`，一句 `accept: true` 会替本机用户打开一个它没想开的通道，且事后从审计里分不出那次同意是交了键鼠还是开了剪贴板。`employee.html` 同步：申请提示按 `pending_permission` 措辞（键鼠 / 剪贴板 / 声音 / 文件传输），按钮上带 `name`；`/control` 不带 `name` 的老调用方现在收到 400 |
 | 2026-09-23 | 1.23 | 修掉权限状态的两种说法（无接口变更）：同一次开关此前只写在其中一处 —— 人在受控端窗口里拨开关时，写的是窗口本地的值，`GET /sessions` 读的那份记录没有动（于是客户页 `/employee` 上的勾选框仍是关的，而通道其实已经通了）；反过来由本接口或应答申请拨动开关时，记录更新了，但窗口那一行不会重画，还是旧位置。现在 `switch_permission`（三条路的共同终点）在发出开关时就把值写进记录，`cm_sh.tis` 的 `addConnection` 对已存在的会话也一并按记录重画这四行 —— 于是窗口、`GET /sessions`、`GET /sessions` 的消费方（`/employee` 勾选框）三处一致。§6.7.4 里「三条落到同一段开关逻辑，所以状态不会出现两种说法」这句此前只是设计意图，现在成立。`--ui` 的原始窗口 `cm.tis` 未动，仍是上游行为 |
 | 2026-09-23 | 1.22 | 新增 §6.11 会话录像上传：由本 API `POST /connect` 发起的会话**自动录屏**，会话结束后把录像文件传到审计服务端 —— 上传地址由 `audit-server-url` 的源派生 `/api/record`，不新增地址配置键。协议沿用上游 rustdesk 的 `type=new/part/tail/remove` + raw body 分片；每个请求重试 3 次，失败放弃不重传，成功记 `record.upload.done`、失败记 `record.upload.fail`。本机文件在上传成功后保留 **3 天**，靠 `<文件名>.uploaded` 标记清理，未上传成功的不动。新增配置 `record-upload-mode`（`chunked` 默认 / `whole`）。客户端实现 `GateDesk/src/record_upload.rs`；接收端为 `GateDeskWeb` 的 `POST /api/record`，落在 `recordings/<device_id>/<session_id>/`。§6.11 另写明录像在本机与服务端的**存放位置**（分平台）、文件名与格式、查看命令 |

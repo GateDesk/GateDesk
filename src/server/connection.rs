@@ -765,20 +765,12 @@ impl Connection {
                                 // same thing, and that is what the peer is told.
                                 conn.set_control_authorized(enabled);
                                 conn.send_permission(Permission::Keyboard, enabled).await;
-                                if let Some(s) = conn.server.upgrade() {
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::NAME,
-                                        conn.inner.clone(), conn.can_sub_clipboard_service());
-                                    #[cfg(feature = "unix-file-copy-paste")]
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::FILE_NAME,
-                                        conn.inner.clone(),
-                                        conn.can_sub_file_clipboard_service(),
-                                    );
-                                    s.write().unwrap().subscribe(
-                                        NAME_CURSOR,
-                                        conn.inner.clone(), enabled || conn.show_remote_cursor);
-                                }
+                                // The subscriptions that follow the keyboard, taken the same
+                                // way the other two doors take them - see
+                                // `resubscribe_services`. `enabled` and
+                                // `peer_keyboard_enabled()` are the same thing by now, which
+                                // is what lets the one call serve all three.
+                                conn.resubscribe_services();
                             } else if &name == "clipboard" {
                                 conn.clipboard = enabled;
                                 conn.send_permission(Permission::Clipboard, enabled).await;
@@ -2340,17 +2332,23 @@ impl Connection {
         self.control_authorized = accepted;
         if accepted {
             self.disable_keyboard = false;
+            // The permission is the other half of the same answer. A session can reach this
+            // point with `self.keyboard` already off - a person turned that row off, or the
+            // local API did - and `peer_input_enabled` is the pair of them, so an approval
+            // that left the permission where it was would hand over a control the peer
+            // cannot use: every keystroke still dropped, while the `control.approve` line
+            // this very answer records says the keyboard went over. The window's own switch
+            // is the same result through the other door - it arrives as a permission switch
+            // and sets both (see the `SwitchPermission` arm above).
+            self.keyboard = true;
         }
         self.send_permission(Permission::Keyboard, self.peer_input_enabled())
             .await;
         if accepted {
-            if let Some(s) = self.server.upgrade() {
-                s.write().unwrap().subscribe(
-                    NAME_CURSOR,
-                    self.inner.clone(),
-                    self.peer_keyboard_enabled() || self.show_remote_cursor,
-                );
-            }
+            // The permission just moved, and the services that follow the keyboard have to be
+            // taken again - see `resubscribe_services`. Without it a clipboard granted
+            // separately from this answer would read "on" everywhere and still carry nothing.
+            self.resubscribe_services();
         }
         self.send_to_cm(ipc::Data::ControlRequest {
             pending: false,
@@ -2446,6 +2444,39 @@ impl Connection {
         self.clipboard_enabled()
             && self.file_transfer_enabled()
             && crate::get_builtin_option(keys::OPTION_ONE_WAY_FILE_TRANSFER) != "Y"
+    }
+
+    /// Take the service subscriptions that follow the keyboard.
+    ///
+    /// The text clipboard is gated on `peer_keyboard_enabled` as well as on the clipboard
+    /// permission, so its subscription has to be taken again every time the keyboard moves.
+    /// Three doors lead here - login, the window's own switch, and an answer to a peer's
+    /// request - and the third one used to take only the cursor: the clipboard went on
+    /// reading "on" everywhere while its service was never subscribed, so a peer that had
+    /// been granted it got nothing.
+    ///
+    /// One function for those three doors, so that the next door cannot quietly miss a
+    /// subscription. The other arms of `SwitchPermission` keep their own: what they
+    /// subscribe to answers to their permission alone and does not move with the keyboard.
+    fn resubscribe_services(&self) {
+        if let Some(s) = self.server.upgrade() {
+            s.write().unwrap().subscribe(
+                super::clipboard_service::NAME,
+                self.inner.clone(),
+                self.can_sub_clipboard_service(),
+            );
+            #[cfg(feature = "unix-file-copy-paste")]
+            s.write().unwrap().subscribe(
+                super::clipboard_service::FILE_NAME,
+                self.inner.clone(),
+                self.can_sub_file_clipboard_service(),
+            );
+            s.write().unwrap().subscribe(
+                NAME_CURSOR,
+                self.inner.clone(),
+                self.peer_keyboard_enabled() || self.show_remote_cursor,
+            );
+        }
     }
 
     fn try_start_cm(&mut self, peer_id: String, name: String, authorized: bool) {
@@ -5101,24 +5132,7 @@ impl Connection {
                 } else {
                     self.disable_keyboard = q == BoolOption::Yes;
                 }
-                if let Some(s) = self.server.upgrade() {
-                    s.write().unwrap().subscribe(
-                        super::clipboard_service::NAME,
-                        self.inner.clone(),
-                        self.can_sub_clipboard_service(),
-                    );
-                    #[cfg(feature = "unix-file-copy-paste")]
-                    s.write().unwrap().subscribe(
-                        super::clipboard_service::FILE_NAME,
-                        self.inner.clone(),
-                        self.can_sub_file_clipboard_service(),
-                    );
-                    s.write().unwrap().subscribe(
-                        NAME_CURSOR,
-                        self.inner.clone(),
-                        self.peer_keyboard_enabled() || self.show_remote_cursor,
-                    );
-                }
+                self.resubscribe_services();
             }
         }
         // A peer asking for one named permission - one of the A-class channels. Like the
