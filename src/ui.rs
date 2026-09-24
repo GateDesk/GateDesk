@@ -256,7 +256,23 @@ pub fn start(args: &mut [String]) {
             return;
         };
         let id = id.to_owned();
+        // `@<path>` is a password handed over in a file rather than on the command line,
+        // which any local user can read back out of the process list; `/connect` sends it
+        // that way. Read once, then remove it - the file holds a credential.
         let pass = iter.next().unwrap_or(&"".to_owned()).clone();
+        let pass = if let Some(path) = pass.strip_prefix('@') {
+            let read = std::fs::read_to_string(path);
+            let _ = std::fs::remove_file(path);
+            match read {
+                Ok(value) => value.trim_end_matches(|c| c == '\r' || c == '\n').to_owned(),
+                Err(e) => {
+                    log::error!("cannot read the password file {}: {}", path, e);
+                    String::new()
+                }
+            }
+        } else {
+            pass
+        };
         let args: Vec<String> = iter.map(|x| x.clone()).collect();
         frame.set_title(&id);
         frame.register_behavior("native-remote", move || {

@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.29（2026-09-24）
+> 版本：1.30（2026-09-24）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -33,7 +33,7 @@ GateDesk 客户端进程内嵌一个仅限本机访问的 HTTP 服务，供**本
 | Token 存储 | 配置文件 `%AppData%\GateDesk\config\GateDesk2.toml` 的 `[options]` 段，键名 `api-token` |
 | Host 校验 | 仅接受 `Host: localhost / 127.0.0.1`，否则 403 `{"error":"host not allowed"}`（防 DNS Rebinding，v1.7） |
 | CORS 收紧 | `Access-Control-Allow-Origin` 仅对受信来源回显：本机来源（localhost / 127.0.0.1，任意端口）或 `[options] api-cors-origin` 列出的来源；非受信来源 403 `{"error":"origin not allowed"}` 且不带 CORS 头（v1.7） |
-| 请求体上限 | `Content-Length` 超过 1024 字节 → 413（v1.7） |
+| 请求体上限 | `Content-Length` 超过 1024 字节 → 413；POST 不带 `Content-Length`（chunked）→ 411（v1.30） |
 
 > ⚠️ Token 必须写在 **GateDesk2.toml**（不是 GateDesk.toml）。`ui_interface::get_option` 链路只读 CONFIG2 的 `[options]`。
 > ⚠️ 修改配置后需**重启 GateDesk** 生效（配置为启动时缓存）。
@@ -120,8 +120,8 @@ POST /connect?id=<目标ID>[&password=<密码>][&relay=true]
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
 | token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
-| id | 是 | string | 目标设备 ID（1~128 字符） |
-| password | 否 | string | 连接密码；省略则弹出窗口等待手动输入 |
+| id | 是 | string | 目标设备 ID 或直连地址（1~128 字符）。不得含 `/`、`\`、空白或控制字符：它同时会进子进程参数、`config/peers/<id>.toml` 和录像文件名（v1.30） |
+| password | 否 | string | 连接密码；省略则弹出窗口等待手动输入。它**不进命令行也不进日志**：服务端写到临时文件（Unix 下 0600）后在参数位传 `@<路径>`，会话进程读完即删（v1.30） |
 | relay | 否 | bool | `true` 时强制走中继服务器 |
 
 **请求示例**
@@ -143,21 +143,6 @@ curl -X POST "http://127.0.0.1:21120/connect?token=<token>&id=555555555&relay=tr
 {"ok":true,"id":"555555555"}
 ```
 
-**浏览器网页 JS 示例**
-
-```javascript
-// 获取本机 ID
-const res = await fetch('http://127.0.0.1:21120/id?token=' + TOKEN);
-const { id } = await res.json();
-
-// 触发连接
-await fetch('http://127.0.0.1:21120/connect?token=' + TOKEN +
-  '&id=' + encodeURIComponent('555555555') +
-  '&password=' + encodeURIComponent('mypass'), { method: 'POST' });
-
-// 断开由本 API 发起的远程会话（断开远程桌面，不影响 GateDesk 主界面）
-await fetch('http://127.0.0.1:21120/disconnect?token=' + TOKEN, { method: 'POST' });
-```
 
 ### 6.3 断开本 API 发起的远程会话
 
@@ -796,6 +781,7 @@ recordings/<device_id>/<session_id>/<录像文件名>
 | 405 | 方法不允许 |
 | 409 | 会话当前状态与该动作不符：应答一个并不存在的申请（`/control`）、`name` 与在途那项申请不符（`/control`，v1.24）、放行一个已经放行的对端（`/approve`）、清理一个还在进行的会话（`/dismiss`）、在权限被运维锁定时改权限（`/permission`，**`keyboard` 例外**） |
 | 413 | 请求体 `Content-Length` 超过 1024 字节（v1.7） |
+| 411 | POST 没有 `Content-Length`（chunked）：body 会被截断读一半，剩下的滞留在 keep-alive 连接里（v1.30） |
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
 | 503 | 本机没有连接管理器进程在监听（无会话、也无那个窗口），§6.7 的接口无法执行（v1.8）；或 `/request-permission` 找不到该对端的会话进程（v1.9 / v1.11） |
 | 504 | 连接管理器 2 秒没回应（§6.7，v1.8）；或对端的会话进程 2 秒没回应（§6.9，v1.9）。两条各自的 2 秒，互不相干 |
@@ -934,6 +920,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-24 | 1.30 | **`/connect` 与请求体三处加固**（§6.2、§2、§7）：（1）`/connect` 的 `id` 此前只查长度，现在拒 `/`、`\`、空白与控制字符（它同时进子进程参数、`config/peers/<id>.toml` 与录像文件名）；（2）连接密码不再作为子进程的第三个参数，改为写临时文件（Unix 0600）后在参数位传 `@<路径>`，会话进程读完即删；spawn 那一行的日志也不再打印含密码的整个参数列表；（3）POST 不带 `Content-Length`（chunked）直接 411，此前只查 `Content-Length` 超限的 413，chunked 能绕过那道检查，body 被 `read_body` 截断读一半、剩余滞留在 keep-alive 连接里 |
 | 2026-09-24 | 1.29 | 文档里 18 处 curl 的 JSON body 统一成 `-d '{"…"}'`（仅文档）：原 §6.5 写成 `-d '{\"…\"}'`，单引号内不做转义，反斜杠会原样发出去，body 不是合法 JSON，照抄必失败（400 `missing or invalid password`）；其余 17 处用双引号加转义，bash 可用，但 PowerShell 下同样会把反斜杠发出去。单引号写法两种 shell 都能直接粘贴 |
 | 2026-09-24 | 1.28 | `GET /sessions` 字段表补全（仅文档）：此前 `is_file_transfer` / `is_view_camera` / `is_terminal` / `port_forward` / `avatar` / `recording` / `from_switch` / `in_voice_call` / `incoming_voice_call` 等挤在一行「other fields」里没有说明；顺带精简 §6.7.1、§6.7.3 的措辞 |
 | 2026-09-24 | 1.27 | **`GET /sessions` 在没有连接管理器时返回空数组**（§6.7.1）：此前回 503，而连接管理器在最后一个会话结束时会自行退出（`quit_gui`，界面上关掉最后一个卡片也走同一条路），于是空闲机器上每轮轮询都收到 503，调用方分不清「没有会话」和「服务没起来」。现在只有 `/sessions` 把「没有管理器」读作「没有会话」，回 `{"ok":true,"sessions":[]}`；其余接口维持 503，它们要的是管理器本身 |

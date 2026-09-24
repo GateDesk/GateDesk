@@ -299,9 +299,39 @@ fn json_field(body: &str, key: &str) -> Option<String> {
     }
 }
 
+/// Whether a `/connect` target is safe to put on a command line and into a path.
+///
+/// Looser than `valid_peer_id` in one place only: a target may be a direct address, so
+/// `:` and `.` are allowed. Path separators and control characters are not - the id also
+/// ends up in `config/peers/<id>.toml` and in recording file names.
+fn valid_connect_target(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\'))
+}
+
+/// Write a connection password where only this user can read it, and return the path.
+///
+/// `/connect` used to pass the password as the third argument of the child's command line,
+/// which any local user can read back out of the process list. The path travels there
+/// instead; the child reads the file once and removes it.
+fn write_connect_secret(password: &str) -> std::io::Result<std::path::PathBuf> {
+    let path = std::env::temp_dir().join(format!("gd-connect-{}.secret", uuid::Uuid::new_v4()));
+    std::fs::write(&path, password)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Written under the caller's umask, which is not necessarily 0600.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(path)
+}
+
 fn handle_connect(request: Request, query: &str) {
     let id = query_param(query, "id");
-    if id.is_empty() || id.len() > 128 {
+    if !valid_connect_target(&id) {
         respond(
             request,
             400,
@@ -309,10 +339,30 @@ fn handle_connect(request: Request, query: &str) {
         );
         return;
     }
-    // Password always occupies the 3rd positional arg (see ui.rs arg parsing);
-    // empty password makes the connect window prompt for it.
+    // Password always occupies the 3rd positional arg (see ui.rs arg parsing); an empty
+    // one makes the connect window prompt for it. What travels there is not the password
+    // itself but `@<path>` - see `write_connect_secret`.
     let password = query_param(query, "password");
-    let mut args: Vec<String> = vec!["--connect".to_owned(), id.clone(), password];
+    let mut secret = None;
+    let password_arg = if password.is_empty() {
+        String::new()
+    } else {
+        match write_connect_secret(&password) {
+            Ok(path) => {
+                let arg = format!("@{}", path.display());
+                secret = Some(path);
+                arg
+            }
+            Err(e) => {
+                return respond(
+                    request,
+                    500,
+                    error_body(&format!("cannot hand the password over: {}", e)),
+                )
+            }
+        }
+    };
+    let mut args: Vec<String> = vec!["--connect".to_owned(), id.clone(), password_arg];
     if query_param(query, "relay") == "true" {
         args.push("--relay".to_owned());
     }
@@ -329,7 +379,9 @@ fn handle_connect(request: Request, query: &str) {
                 // Read while the process is certainly still the one just started, so that a
                 // later `/disconnect` can tell it from whatever holds the pid after it.
                 let created = process_created(pid).unwrap_or(0);
-                log::info!("http api connect spawned pid {} args {:?}", pid, args);
+                // Not the arguments: the third one is where a password would have been,
+                // and this line used to write it into the log file verbatim.
+                log::info!("http api connect spawned pid {} for peer {}", pid, id);
                 connect_sessions().lock().unwrap().push(ConnectSession {
                     id: id.clone(),
                     pid,
@@ -345,6 +397,9 @@ fn handle_connect(request: Request, query: &str) {
                 respond(request, 200, format!("{{\"ok\":true,\"id\":\"{}\"}}", id))
             }
             Err(e) => {
+                if let Some(path) = secret.take() {
+                    let _ = std::fs::remove_file(path);
+                }
                 crate::audit::record(
                     "connect.start",
                     "operator",
@@ -891,13 +946,20 @@ fn handle(request: Request) {
     }
     CORS_ORIGIN.with(|o| *o.borrow_mut() = origin);
     // Unified request-body cap.
-    if let Some(len) = request_header(&request, "Content-Length") {
-        if let Ok(n) = len.trim().parse::<usize>() {
-            if n > MAX_BODY_BYTES {
-                respond(request, 413, "{\"error\":\"payload too large\"}".to_owned());
-                return;
-            }
+    // Bodies are small and every caller this API has sends a length with one. A POST
+    // without it is a chunked body, and `read_body` stops reading at the cap: what is left
+    // would stay in the connection and become the start of the next request on a
+    // keep-alive one. Refused here rather than half-read later.
+    let declared_len = request_header(&request, "Content-Length")
+        .and_then(|len| len.trim().parse::<usize>().ok());
+    if let Some(n) = declared_len {
+        if n > MAX_BODY_BYTES {
+            respond(request, 413, "{\"error\":\"payload too large\"}".to_owned());
+            return;
         }
+    } else if request.method() == &Method::Post {
+        respond(request, 411, "{\"error\":\"length required\"}".to_owned());
+        return;
     }
 
     // CORS preflight
