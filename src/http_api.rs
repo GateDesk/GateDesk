@@ -27,12 +27,42 @@ thread_local! {
     static CORS_ORIGIN: RefCell<String> = RefCell::new(String::new());
 }
 
-/// (target id, pid) of connect-session processes spawned by `POST /connect`.
+/// The connect-session processes spawned by `POST /connect`, each with the peer it was
+/// opened for and a way to recognise the process again later.
 /// `POST /disconnect` closes only these windows, never the main UI process.
-static CONNECT_SESSIONS: OnceLock<Mutex<Vec<(String, u32)>>> = OnceLock::new();
+static CONNECT_SESSIONS: OnceLock<Mutex<Vec<ConnectSession>>> = OnceLock::new();
 
-fn connect_sessions() -> &'static Mutex<Vec<(String, u32)>> {
+fn connect_sessions() -> &'static Mutex<Vec<ConnectSession>> {
     CONNECT_SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// A session process `POST /connect` started, with what it takes to recognise it again.
+#[derive(Clone)]
+struct ConnectSession {
+    /// The peer this session was opened for, which is what `/status` reports.
+    id: String,
+    pid: u32,
+    /// When the system says the process was created; 0 when that cannot be read.
+    ///
+    /// A pid is not an identity - Windows reuses them - and `terminate_pid` kills a whole
+    /// process tree, so a record whose pid now belongs to somebody else must never be acted
+    /// on. Comparing this again before killing is what keeps a stale record from ending a
+    /// process nobody asked about.
+    created: u64,
+}
+
+impl ConnectSession {
+    /// Whether the process recorded here is still the same one.
+    fn alive(&self) -> bool {
+        match process_created(self.pid) {
+            // No such process any more.
+            None => false,
+            // Nothing was recorded to compare against, so all that can be said is that the
+            // pid is taken. This is what the check did before there was anything better.
+            Some(_) if self.created == 0 => true,
+            Some(created) => created == self.created,
+        }
+    }
 }
 
 /// The config file holds `api-token` in `[options]`; tighten its permissions to
@@ -295,8 +325,16 @@ fn handle_connect(request: Request, query: &str) {
             .spawn()
         {
             Ok(child) => {
-                log::info!("http api connect spawned pid {} args {:?}", child.id(), args);
-                connect_sessions().lock().unwrap().push((id.clone(), child.id()));
+                let pid = child.id();
+                // Read while the process is certainly still the one just started, so that a
+                // later `/disconnect` can tell it from whatever holds the pid after it.
+                let created = process_created(pid).unwrap_or(0);
+                log::info!("http api connect spawned pid {} args {:?}", pid, args);
+                connect_sessions().lock().unwrap().push(ConnectSession {
+                    id: id.clone(),
+                    pid,
+                    created,
+                });
                 crate::audit::record(
                     "connect.start",
                     "operator",
@@ -342,8 +380,14 @@ fn handle_connect(request: Request, query: &str) {
 /// Used only for the connect-session processes recorded by this API.
 #[cfg(windows)]
 fn terminate_pid(target_pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+    // `taskkill` is a console program and this one has no console of its own, so without
+    // the flag Windows gives the child a fresh console window - a black rectangle flashing
+    // up once per pid, which is what a `/disconnect` over a list of stale pids looked like.
     std::process::Command::new("taskkill")
         .args(["/PID", &target_pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW.0)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -368,39 +412,77 @@ fn terminate_pid(_target_pid: u32) -> bool {
     false
 }
 
-/// Whether a recorded connect-session process is still running.
-#[cfg(unix)]
-fn pid_alive(target_pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &target_pid.to_string()])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// When `pid` was created, or `None` when there is no such process.
+///
+/// This is what tells a recorded pid apart from a different process that has since taken
+/// the same number.
+#[cfg(windows)]
+fn process_created(pid: u32) -> Option<u64> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let read = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user)
+            .is_ok();
+        let _ = CloseHandle(handle);
+        if !read {
+            // Gone between the open and the query.
+            return None;
+        }
+        Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
+    }
 }
 
-#[cfg(not(unix))]
-fn pid_alive(_target_pid: u32) -> bool {
-    true // keep old semantics on platforms without a cheap liveness probe
+/// When `pid` was created, or `None` when there is no such process.
+///
+/// The liveness probe is here but not a creation time that every Unix has, so 0 is
+/// reported and the comparison falls back to asking whether the pid is taken. The kill
+/// that makes the difference between the two worth having - one that takes the whole
+/// process tree - is the Windows one.
+#[cfg(unix)]
+fn process_created(pid: u32) -> Option<u64> {
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    alive.then_some(0)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn process_created(_pid: u32) -> Option<u64> {
+    // No liveness probe at all here: keep the old behaviour, which assumed it was there.
+    Some(0)
 }
 
 /// Disconnect the remote-session processes spawned by `POST /connect`.
 ///
 /// Safety: terminates ONLY the connect-session processes recorded by this API
-/// (process ids captured at spawn time). It never touches the main GateDesk UI
-/// process and performs no system-level action (no shutdown / logoff / reboot).
+/// (process ids captured at spawn time, each checked against the creation time of the
+/// process now holding that pid). It never touches the main GateDesk UI process and
+/// performs no system-level action (no shutdown / logoff / reboot).
 fn disconnect_api_sessions() -> usize {
     let mut sessions = connect_sessions().lock().unwrap();
     let mut closed = 0usize;
-    let mut keep: Vec<(String, u32)> = Vec::new();
-    for (id, pid) in sessions.iter() {
-        if !pid_alive(*pid) {
-            continue; // window already closed by the user -> session ended
+    let mut keep: Vec<ConnectSession> = Vec::new();
+    for session in sessions.iter() {
+        if !session.alive() {
+            // The session ended on its own, or this pid has been handed to somebody else
+            // since. Either way the record is done with, and nothing is killed: leaving it
+            // here is what made every `/disconnect` walk the same dead list again.
+            continue;
         }
-        if terminate_pid(*pid) {
-            log::info!("http api disconnect terminated pid {}", pid);
+        if terminate_pid(session.pid) {
+            log::info!("http api disconnect terminated pid {}", session.pid);
             closed += 1;
         } else {
-            keep.push((id.clone(), *pid)); // still alive but terminate failed
+            keep.push(session.clone()); // still alive but terminate failed
         }
     }
     *sessions = keep;
@@ -760,8 +842,8 @@ fn handle_status(request: Request) {
     let online = crate::ui_interface::get_connect_status().status_num != 0;
     let assistable = crate::ui_interface::is_local_permanent_password_set();
     let mut sessions = connect_sessions().lock().unwrap();
-    sessions.retain(|(_, pid)| pid_alive(*pid));
-    let peer_id = sessions.last().map(|(id, _)| id.clone());
+    sessions.retain(|session| session.alive());
+    let peer_id = sessions.last().map(|session| session.id.clone());
     drop(sessions);
     match peer_id {
         Some(id) => respond(
