@@ -747,6 +747,14 @@ fn handle_sessions(request: Request) {
     };
     match cm_call(call) {
         Ok(reply) => respond_reply(request, reply, "sessions"),
+        // No session manager is a machine with no sessions, and that is the question this
+        // endpoint asks. The 503 it used to answer with is the honest one for the other
+        // actions - they need the manager itself - but here it leaves a caller unable to
+        // tell "there are none" from "nobody is listening", which is the one thing a
+        // polling loop has to be able to act on. It is not an edge case either: the manager
+        // exits on its own once the last session ends, so this is the ordinary state of a
+        // machine nobody is connected to.
+        Err((503, _)) => respond(request, 200, "{\"ok\":true,\"sessions\":[]}".to_owned()),
         Err((status, reason)) => respond(request, status, error_body(&reason)),
     }
 }
@@ -980,6 +988,7 @@ fn handle(request: Request) {
         }
     }
 }
+
 
 
 
