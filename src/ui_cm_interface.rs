@@ -635,34 +635,52 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
         );
         return;
     }
-    // Written down here, where the switch is actually sent, because this is the common end
-    // of every door into a permission: the window's own click, the local API, and answering
-    // a peer's request. Only the click redraws the page from its own guess - the other two
-    // have no page behind them, and `GET /sessions` reads this record rather than the
-    // window, so a switch that stayed out of it looked like it had never happened to
-    // anyone reading the state (and to the customer page, which draws its checkboxes from
-    // exactly that).
+    // The switch goes out first, and only then is it written down, so the two cannot
+    // disagree about whether it happened.
+    if !send_switch(id, &name, enabled) {
+        return;
+    }
+    // Written down here, at the common end of every door into a permission - the window's
+    // own click, the local API, and answering a peer's request. Only the click redraws the
+    // page from its own guess; the other two have no page behind them, and `GET /sessions`
+    // reads this record rather than the window, so a switch that stayed out of it looked
+    // like it had never happened to anyone reading the state (and to the customer page,
+    // which draws its checkboxes from exactly that).
     //
     // And only once the switch has really gone out: a record saying "on" for a message that
     // never left this process is the same two-answers problem seen from the other side, and
     // a connection that is on its way out is exactly when a caller is most likely to be
     // reading the state to decide what to do next.
-    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
-        if let Err(e) = client.tx.send(Data::SwitchPermission {
-            name: name.clone(),
-            enabled,
-        }) {
-            log::error!(
-                "permission {} for session {} was not sent: {}",
-                name,
-                id,
-                e
-            );
-            return;
-        }
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        record_permission(id, &name, enabled);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    record_permission(id, &name, enabled);
+}
+
+/// Hand one switch to a session's connection.
+///
+/// `false` when there is no such session, or its channel is closed - the caller must then
+/// record nothing.
+///
+/// A separate call, not an `if let Some(client) = CLIENTS.read()...` block around the
+/// recording: `record_permission` takes that same lock for writing, and a caller holding
+/// the read guard across both waits on itself. The connection manager's task thread then
+/// never answers again (the local API times out on every switch), and every later writer
+/// in the process waits on the read guard it is still holding. Read, let go, then write.
+#[cfg(not(any(target_os = "ios")))]
+fn send_switch(id: i32, name: &str, enabled: bool) -> bool {
+    let clients = CLIENTS.read().unwrap();
+    let Some(client) = clients.get(&id) else {
+        return false;
     };
+    match client.tx.send(Data::SwitchPermission {
+        name: name.to_owned(),
+        enabled,
+    }) {
+        Ok(()) => true,
+        Err(e) => {
+            log::error!("permission {} for session {} was not sent: {}", name, id, e);
+            false
+        }
+    }
 }
 
 /// Whether policy lets permissions be switched at all right now.
