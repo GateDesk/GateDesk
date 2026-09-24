@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.25（2026-09-24）
+> 版本：1.26（2026-09-24）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -119,6 +119,7 @@ POST /connect?id=<目标ID>[&password=<密码>][&relay=true]
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | string | 目标设备 ID（1~128 字符） |
 | password | 否 | string | 连接密码；省略则弹出窗口等待手动输入 |
 | relay | 否 | bool | `true` 时强制走中继服务器 |
@@ -256,7 +257,8 @@ curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: a
 
 各小节的「什么时候会失败」给的是精确条件，这里只说规律：
 
-- `400`：参数缺失或非法。
+- `400`：参数缺失或非法（token 不算在这一类，见下行）。
+- `401`：token 缺失、错误，或本机未配置 `api-token`；响应体区分两种原因（§7）。每个接口都要，`GET /sessions` 也不例外。
 - `404`：`id` 对应的会话不存在，写错了或已被 `/dismiss` 清掉。
 - `409`：会话在，但按当前状态做不了这件事。
 - `503`：本机没有连接管理器进程在监听 `_cm`，既没有会话，也没有那个窗口。
@@ -331,7 +333,7 @@ GET /sessions
 | name | string | 对端名称 |
 | other fields | — | 各项权限的当前值，与界面上的开关一一对应 |
 
-**什么时候会失败**：本机没有连接管理器进程在监听 `_cm`（既没有会话，也没有那个窗口）→ 503；它 2 秒没回应 → 504。只要它在监听就返回数组：一个会话都没有时是 `[]`，会话刚结束但条目还没清掉时，那些条目仍会出现（`disconnected: true`）。本接口不接受 `id` 参数，因此不会返回 404。
+**什么时候会失败**：token 缺失或不符 → 401；本机没有连接管理器进程在监听 `_cm`（既没有会话，也没有那个窗口）→ 503；它 2 秒没回应 → 504。只要它在监听就返回数组：一个会话都没有时是 `[]`，会话刚结束但条目还没清掉时，那些条目仍会出现（`disconnected: true`）。本接口不接受 `id` 参数，因此不会返回 404。
 
 #### 6.7.2 批准或拒绝接入
 
@@ -343,6 +345,7 @@ POST /approve
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | int | 会话标识 |
 | accept | 是 | bool | `true` 放行；`false` 拒绝，连接随即结束（与 §6.7.5 是同一个断开动作） |
 
@@ -379,6 +382,7 @@ POST /control
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | int | 会话标识 |
 | name | 是 | string | 应答哪一项：`keyboard` / `clipboard` / `audio` / `file`。与在途申请不符 → 409（v1.24 起必填） |
 | accept | 是 | bool | `true` 允许；`false` 拒绝 |
@@ -413,6 +417,7 @@ POST /permission
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | int | 会话标识 |
 | name | 是 | string | `keyboard` / `clipboard` / `audio` / `file` |
 | enabled | 是 | bool | 目标状态 |
@@ -467,6 +472,7 @@ POST /terminate
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | int | 会话标识 |
 
 **请求示例**
@@ -495,6 +501,7 @@ POST /dismiss
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | int | 会话标识 |
 
 **成功响应（200）**
@@ -529,6 +536,7 @@ POST /request-permission
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
+| token | 是 | string | 本地 API 令牌（`api-token`）。所有接口都要求：随 URL 传 `?token=<token>`，或走请求头 `Authorization: Bearer <token>`（§4）。缺失、错误或本机未配置 → 401 |
 | id | 是 | string | 对端设备 ID，必须是本机已由 `/connect` 打开的会话 |
 | name | 是 | string | `keyboard` / `clipboard` / `audio` / `file`，即受控端的四项 A 类权限（§6.7.4） |
 
@@ -916,6 +924,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-24 | 1.26 | 文档补漏（无接口变更）：**每个接口的参数表加上 `token` 行**，§6.7 的错误码规律补上 `401`。token 此前只在 §2「安全要求」与 §4「鉴权方式」里说明、只出现在各节的 curl 示例里，单独看某一节的参数表（尤其 `GET /sessions` 这种没有业务参数的）会以为不必带；实现里 `handle()` 是**先校验 token 再分派**的，`/id`、`/sessions`、`/approve` 一个都不例外，缺失或不符一律 401 |
 | 2026-09-24 | 1.25 | **应答键鼠申请现在真能用了**（§6.7.3，无接口变更）：`accept: true` 此前只打开会话控制闸门（`control_authorized`），不动 `keyboard` 权限，而 `peer_input_enabled()` 是这两样的积 —— 于是当该会话的 `keyboard` 权限被关过时，接受申请后对端依旧一个键也敲不进来，`cm_sh` 上的键盘行也不亮，可审计里已经记了一条 `control.approve`，读日志的人会以为键鼠交出去了。现在 `resolve_control_request` 在同意时一并把 `keyboard` 权限打开，与点界面开关、`/permission {"name":"keyboard"}` 走到同一结果（记录、审计、窗口那一行三处一致）|
 | 2026-09-23 | 1.24 | **`POST /control` 补上“应答的是哪一项”**（§6.7.3）：请求新增**必填** `name`（`keyboard` / `clipboard` / `audio` / `file`，与 `/request-permission` 同一套名字），必须与在途申请一致，不符 → 409 `the pending request is for …`；响应回显 `result.name`；审计 `control.approve` / `control.deny` 的 `extra` 从 `{peer_id}` 变为 `{peer_id, permission}`（空字符串=键鼠，与 `control.timeout` 一致）。此前本接口只认“在途的那一项”，调用方若拿着过期的 `/sessions`，一句 `accept: true` 会替本机用户打开一个它没想开的通道，且事后从审计里分不出那次同意是交了键鼠还是开了剪贴板。`employee.html` 同步：申请提示按 `pending_permission` 措辞（键鼠 / 剪贴板 / 声音 / 文件传输），按钮上带 `name`；`/control` 不带 `name` 的老调用方现在收到 400 |
 | 2026-09-23 | 1.23 | 修掉权限状态的两种说法（无接口变更）：同一次开关此前只写在其中一处 —— 人在受控端窗口里拨开关时，写的是窗口本地的值，`GET /sessions` 读的那份记录没有动（于是客户页 `/employee` 上的勾选框仍是关的，而通道其实已经通了）；反过来由本接口或应答申请拨动开关时，记录更新了，但窗口那一行不会重画，还是旧位置。现在 `switch_permission`（三条路的共同终点）在发出开关时就把值写进记录，`cm_sh.tis` 的 `addConnection` 对已存在的会话也一并按记录重画这四行 —— 于是窗口、`GET /sessions`、`GET /sessions` 的消费方（`/employee` 勾选框）三处一致。§6.7.4 里「三条落到同一段开关逻辑，所以状态不会出现两种说法」这句此前只是设计意图，现在成立。`--ui` 的原始窗口 `cm.tis` 未动，仍是上游行为 |
