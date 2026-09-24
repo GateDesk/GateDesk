@@ -99,21 +99,40 @@ impl NamedInterface for fragmented_video_destination {
 }
 
 
-/// COM `IUnknown` alike thing.
-#[repr(C)]
-struct iasset_vtbl {
-	/// Increments the reference count for an interface on an object.
-	pub add_ref: extern "C" fn(this: *mut iasset) -> i32,
+/// The calling convention these interfaces are called with, per target.
+///
+/// The four tables below are the host's half of Sciter's native object model: the engine
+/// hands out a plain vtable and its methods are C++ ones. On x86 that is `thiscall` - the
+/// callee takes `this` from ECX - so declaring them `extern "C"` puts the receiver on the
+/// stack instead and every call arrives with `this` set to whatever ECX happened to hold.
+/// The first method dereferences it, which is a crash inside the engine with no frame of
+/// ours in the stack: that is how a 32 bit client died on its first `<video>` bind request,
+/// and x64 is spared only because it has a single calling convention. `extern "thiscall"`
+/// has been stable since Rust 1.73; this crate's own example still bails out on Windows x86
+/// over it, from the days when it needed a nightly compiler.
+macro_rules! define_iasset_vtbl {
+	($abi:literal) => {
+		/// COM `IUnknown` alike thing.
+		#[repr(C)]
+		struct iasset_vtbl {
+			/// Increments the reference count for an interface on an object.
+			pub add_ref: extern $abi fn(this: *mut iasset) -> i32,
 
-	/// Decrements the reference count for an interface on an object.
-	pub release: extern "C" fn(this: *mut iasset) -> i32,
+			/// Decrements the reference count for an interface on an object.
+			pub release: extern $abi fn(this: *mut iasset) -> i32,
 
-	/// Retrieves pointers to the supported interfaces on an object.
-	pub get_interface: extern "C" fn(this: *mut iasset, name: LPCSTR, out: *mut *mut iasset) -> bool,
+			/// Retrieves pointers to the supported interfaces on an object.
+			pub get_interface: extern $abi fn(this: *mut iasset, name: LPCSTR, out: *mut *mut iasset) -> bool,
 
-	/// Retrieves a pointer to the passport declaration of an object.
-	pub get_passport: extern "C" fn(thing: *mut iasset) -> *const som_passport_t,
+			/// Retrieves a pointer to the passport declaration of an object.
+			pub get_passport: extern $abi fn(thing: *mut iasset) -> *const som_passport_t,
+		}
+	};
 }
+#[cfg(target_arch = "x86")]
+define_iasset_vtbl!("thiscall");
+#[cfg(not(target_arch = "x86"))]
+define_iasset_vtbl!("C");
 
 /// COM `IUnknown` alike thing.
 #[repr(C)]
@@ -140,41 +159,49 @@ impl iasset {
 
 
 /// Video source interface, used by engine to query video state.
-#[repr(C)]
-struct video_source_vtbl {
-	// region: iasset
-	/// Increments the reference count for an interface on an object.
-	pub add_ref: extern "C" fn(this: *mut video_source) -> i32,
+macro_rules! define_video_source_vtbl {
+	($abi:literal) => {
+		#[repr(C)]
+		struct video_source_vtbl {
+			// region: iasset
+			/// Increments the reference count for an interface on an object.
+			pub add_ref: extern $abi fn(this: *mut video_source) -> i32,
 
-	/// Decrements the reference count for an interface on an object.
-	pub release: extern "C" fn(this: *mut video_source) -> i32,
+			/// Decrements the reference count for an interface on an object.
+			pub release: extern $abi fn(this: *mut video_source) -> i32,
 
-	/// Retrieves pointers to the supported interfaces on an object.
-	pub get_interface: extern "C" fn(this: *mut video_source, name: *const u8, out: *mut *mut iasset) -> bool,
+			/// Retrieves pointers to the supported interfaces on an object.
+			pub get_interface: extern $abi fn(this: *mut video_source, name: *const u8, out: *mut *mut iasset) -> bool,
 
-	/// Retrieves a pointer to the passport declaration of an object.
-	pub get_passport: extern "C" fn(thing: *mut iasset) -> *const som_passport_t,
-	// endregion
+			/// Retrieves a pointer to the passport declaration of an object.
+			pub get_passport: extern $abi fn(thing: *mut iasset) -> *const som_passport_t,
+			// endregion
 
-	// region: video_source
-	pub play: extern "C" fn(this: *mut video_source) -> bool,
-	pub pause: extern "C" fn(this: *mut video_source) -> bool,
-	pub stop: extern "C" fn(this: *mut video_source) -> bool,
+			// region: video_source
+			pub play: extern $abi fn(this: *mut video_source) -> bool,
+			pub pause: extern $abi fn(this: *mut video_source) -> bool,
+			pub stop: extern $abi fn(this: *mut video_source) -> bool,
 
-	pub get_is_ended: extern "C" fn(this: *const video_source, is_end: *mut bool) -> bool,
+			pub get_is_ended: extern $abi fn(this: *const video_source, is_end: *mut bool) -> bool,
 
-	pub get_position: extern "C" fn(this: *const video_source, seconds: *mut f64) -> bool,
-	pub set_position: extern "C" fn(this: *mut video_source, seconds: f64) -> bool,
+			pub get_position: extern $abi fn(this: *const video_source, seconds: *mut f64) -> bool,
+			pub set_position: extern $abi fn(this: *mut video_source, seconds: f64) -> bool,
 
-	pub get_duration: extern "C" fn(this: *const video_source, seconds: *mut f64) -> bool,
+			pub get_duration: extern $abi fn(this: *const video_source, seconds: *mut f64) -> bool,
 
-	pub get_volume: extern "C" fn(this: *const video_source, volume: *mut f64) -> bool,
-	pub set_volume: extern "C" fn(this: *mut video_source, volume: f64) -> bool,
+			pub get_volume: extern $abi fn(this: *const video_source, volume: *mut f64) -> bool,
+			pub set_volume: extern $abi fn(this: *mut video_source, volume: f64) -> bool,
 
-	pub get_balance: extern "C" fn(this: *const video_source, balance: *mut f64) -> bool,
-	pub set_balance: extern "C" fn(this: *mut video_source, balance: f64) -> bool,
-	// endregion
+			pub get_balance: extern $abi fn(this: *const video_source, balance: *mut f64) -> bool,
+			pub set_balance: extern $abi fn(this: *mut video_source, balance: f64) -> bool,
+			// endregion
+		}
+	};
 }
+#[cfg(target_arch = "x86")]
+define_video_source_vtbl!("thiscall");
+#[cfg(not(target_arch = "x86"))]
+define_video_source_vtbl!("C");
 
 /// Video source interface to query video state.
 #[repr(C)]
@@ -250,39 +277,47 @@ impl video_source {
 
 
 /// Video destination interface, represents video rendering site.
-#[repr(C)]
-struct video_destination_vtbl {
-	// region: iasset:
-	/// Increments the reference count for an interface on an object.
-	pub add_ref: extern "C" fn(this: *mut video_destination) -> i32,
+macro_rules! define_video_destination_vtbl {
+	($abi:literal) => {
+		#[repr(C)]
+		struct video_destination_vtbl {
+			// region: iasset:
+			/// Increments the reference count for an interface on an object.
+			pub add_ref: extern $abi fn(this: *mut video_destination) -> i32,
 
-	/// Decrements the reference count for an interface on an object.
-	pub release: extern "C" fn(this: *mut video_destination) -> i32,
+			/// Decrements the reference count for an interface on an object.
+			pub release: extern $abi fn(this: *mut video_destination) -> i32,
 
-	/// Retrieves pointers to the supported interfaces on an object.
-	pub get_interface: extern "C" fn(this: *mut video_destination, name: *const u8, out: *mut *mut iasset) -> bool,
+			/// Retrieves pointers to the supported interfaces on an object.
+			pub get_interface: extern $abi fn(this: *mut video_destination, name: *const u8, out: *mut *mut iasset) -> bool,
 
-	/// Retrieves a pointer to the passport declaration of an object.
-	pub get_passport: extern "C" fn(thing: *mut iasset) -> *const som_passport_t,
-	// endregion
+			/// Retrieves a pointer to the passport declaration of an object.
+			pub get_passport: extern $abi fn(thing: *mut iasset) -> *const som_passport_t,
+			// endregion
 
-	// region: video_destination
-	/// Whether this instance of `video_renderer` is attached to a DOM element and is capable of playing.
-	pub is_alive: extern "C" fn(this: *const video_destination) -> bool,
+			// region: video_destination
+			/// Whether this instance of `video_renderer` is attached to a DOM element and is capable of playing.
+			pub is_alive: extern $abi fn(this: *const video_destination) -> bool,
 
-	/// Start streaming/rendering.
-	pub start_streaming: extern "C" fn(this: *mut video_destination, frame_width: i32, frame_height: i32, color_space: COLOR_SPACE, src: *const video_source) -> bool,
+			/// Start streaming/rendering.
+			pub start_streaming: extern $abi fn(this: *mut video_destination, frame_width: i32, frame_height: i32, color_space: COLOR_SPACE, src: *const video_source) -> bool,
 
-	/// Stop streaming.
-	pub stop_streaming: extern "C" fn(this: *mut video_destination) -> bool,
+			/// Stop streaming.
+			pub stop_streaming: extern $abi fn(this: *mut video_destination) -> bool,
 
-	/// Render the next frame.
-	pub render_frame: extern "C" fn(this: *mut video_destination, data: LPCBYTE, size: UINT) -> bool,
+			/// Render the next frame.
+			pub render_frame: extern $abi fn(this: *mut video_destination, data: LPCBYTE, size: UINT) -> bool,
 
-	/// Render the next frame with the given stride.
-	pub render_frame_with_stride: extern "C" fn(this: *mut video_destination, data: LPCBYTE, size: UINT, stride: UINT) -> bool,
-	// endregion
+			/// Render the next frame with the given stride.
+			pub render_frame_with_stride: extern $abi fn(this: *mut video_destination, data: LPCBYTE, size: UINT, stride: UINT) -> bool,
+			// endregion
+		}
+	};
 }
+#[cfg(target_arch = "x86")]
+define_video_destination_vtbl!("thiscall");
+#[cfg(not(target_arch = "x86"))]
+define_video_destination_vtbl!("C");
 
 /// Video destination interface, represents video rendering site.
 #[repr(C)]
@@ -325,44 +360,52 @@ impl video_destination {
 
 
 /// Fragmented destination interface, used for partial updates.
-#[repr(C)]
-struct fragmented_video_destination_vtbl {
-	// region: iasset:
-	/// Increments the reference count for an interface on an object.
-	pub add_ref: extern "C" fn(this: *mut fragmented_video_destination) -> i32,
+macro_rules! define_fragmented_destination_vtbl {
+	($abi:literal) => {
+		#[repr(C)]
+		struct fragmented_video_destination_vtbl {
+			// region: iasset:
+			/// Increments the reference count for an interface on an object.
+			pub add_ref: extern $abi fn(this: *mut fragmented_video_destination) -> i32,
 
-	/// Decrements the reference count for an interface on an object.
-	pub release: extern "C" fn(this: *mut fragmented_video_destination) -> i32,
+			/// Decrements the reference count for an interface on an object.
+			pub release: extern $abi fn(this: *mut fragmented_video_destination) -> i32,
 
-	/// Retrieves pointers to the supported interfaces on an object.
-	pub get_interface: extern "C" fn(this: *mut fragmented_video_destination, name: *const u8, out: *mut *mut iasset) -> bool,
+			/// Retrieves pointers to the supported interfaces on an object.
+			pub get_interface: extern $abi fn(this: *mut fragmented_video_destination, name: *const u8, out: *mut *mut iasset) -> bool,
 
-	/// Retrieves a pointer to the passport declaration of an object.
-	pub get_passport: extern "C" fn(thing: *mut iasset) -> *const som_passport_t,
-	// endregion
+			/// Retrieves a pointer to the passport declaration of an object.
+			pub get_passport: extern $abi fn(thing: *mut iasset) -> *const som_passport_t,
+			// endregion
 
-	// region: video_destination
-	/// Whether this instance of `video_renderer` is attached to a DOM element and is capable of playing.
-	pub is_alive: extern "C" fn(this: *const fragmented_video_destination) -> bool,
+			// region: video_destination
+			/// Whether this instance of `video_renderer` is attached to a DOM element and is capable of playing.
+			pub is_alive: extern $abi fn(this: *const fragmented_video_destination) -> bool,
 
-	/// Start streaming/rendering.
-	pub start_streaming: extern "C" fn(this: *mut fragmented_video_destination, frame_width: i32, frame_height: i32, color_space: COLOR_SPACE, src: *const video_source) -> bool,
+			/// Start streaming/rendering.
+			pub start_streaming: extern $abi fn(this: *mut fragmented_video_destination, frame_width: i32, frame_height: i32, color_space: COLOR_SPACE, src: *const video_source) -> bool,
 
-	/// Stop streaming.
-	pub stop_streaming: extern "C" fn(this: *mut fragmented_video_destination) -> bool,
+			/// Stop streaming.
+			pub stop_streaming: extern $abi fn(this: *mut fragmented_video_destination) -> bool,
 
-	/// Render the next frame.
-	pub render_frame: extern "C" fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT) -> bool,
+			/// Render the next frame.
+			pub render_frame: extern $abi fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT) -> bool,
 
-	/// Render the next frame with the given stride.
-	pub render_frame_with_stride: extern "C" fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT, stride: UINT) -> bool,
-	// endregion
+			/// Render the next frame with the given stride.
+			pub render_frame_with_stride: extern $abi fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT, stride: UINT) -> bool,
+			// endregion
 
-	// region: fragmented_video_destination
-	/// Render the specified part of the current frame.
-	pub render_frame_part: extern "C" fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT, x: i32, y: i32, width: i32, height: i32) -> bool,
-	// endregion
+			// region: fragmented_video_destination
+			/// Render the specified part of the current frame.
+			pub render_frame_part: extern $abi fn(this: *mut fragmented_video_destination, data: LPCBYTE, size: UINT, x: i32, y: i32, width: i32, height: i32) -> bool,
+			// endregion
+		}
+	};
 }
+#[cfg(target_arch = "x86")]
+define_fragmented_destination_vtbl!("thiscall");
+#[cfg(not(target_arch = "x86"))]
+define_fragmented_destination_vtbl!("C");
 
 /// Fragmented destination interface, used for partial updates.
 #[repr(C)]
