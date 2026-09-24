@@ -367,7 +367,12 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         // does not is the answer, rather than a button that was not drawn. The peer id
         // is read here as well, to hand back for the caller's own log: the panel shows
         // it, a program calling this has nothing to show.
-        let (exists, authorized, disconnected, pending_control, peer_json) = {
+        // Read once, so that every branch below answers from the same snapshot instead
+        // of each taking the lock again: the state a branch checks and the state it
+        // reports are then the same state. `pending_permission` and the peer object are
+        // in here for the two things the caller is told: which permission is waiting, and
+        // whose it is.
+        let (exists, authorized, disconnected, pending_control, pending_permission, peer) = {
             let clients = CLIENTS.read().unwrap();
             match clients.get(&call.id) {
                 Some(c) => (
@@ -375,9 +380,17 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                     c.authorized,
                     c.disconnected,
                     c.pending_control,
-                    serde_json::json!({"peer_id": c.peer_id}).to_string(),
+                    c.pending_permission.clone(),
+                    serde_json::json!({"peer_id": c.peer_id}),
                 ),
-                None => (false, false, false, false, String::new()),
+                None => (
+                    false,
+                    false,
+                    false,
+                    false,
+                    String::new(),
+                    serde_json::json!({}),
+                ),
             }
         };
         match call.action {
@@ -408,20 +421,44 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                     close(call.id);
                 }
                 LocalApiReply::Ok {
-                    data: peer_json.clone(),
+                    data: peer.to_string(),
                 }
             }
-            LocalApiAction::Control { accept } => {
+            LocalApiAction::Control { name, accept } => {
                 if !pending_control {
                     return LocalApiReply::Conflict {
                         reason: "no control request is pending".to_owned(),
                     };
                 }
+                // The request in flight says which permission it is for, in the internal
+                // spelling - empty for the keyboard - and the caller says which one it is
+                // answering. They have to be the same thing: an answer that named a
+                // different one would open that channel instead, and the caller would have
+                // no way to tell, since this is the request it read a moment ago.
+                let asked = if pending_permission.is_empty() {
+                    "keyboard"
+                } else {
+                    pending_permission.as_str()
+                };
+                if asked != name.as_str() {
+                    return LocalApiReply::Conflict {
+                        reason: format!("the pending request is for {}", asked),
+                    };
+                }
                 // The server settles the request and sends `ControlRequest` back with
                 // `pending: false`, which is what clears the panel's prompt.
                 respond_control_request(call.id, accept);
+                // An accepted named request is a permission switched by a door that has no
+                // page behind it - `switch_permission` has written the value down by now,
+                // and this is the window's half of it. Nothing moved when the request was
+                // for the keyboard; the redraw is then the record as it already stands.
+                self.redraw_permission(call.id);
+                // Told back so that the answer names what it answered, not just whose
+                // session it was.
+                let mut data = peer;
+                data["name"] = serde_json::json!(name);
                 LocalApiReply::Ok {
-                    data: peer_json.clone(),
+                    data: data.to_string(),
                 }
             }
             LocalApiAction::Permission { name, enabled } => {
@@ -441,10 +478,10 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                         reason: "permissions cannot be changed in the accept window".to_owned(),
                     };
                 }
-                switch_permission(call.id, name.clone(), enabled);
-                self.set_permission_locally(call.id, &name, enabled);
+                switch_permission(call.id, name, enabled);
+                self.redraw_permission(call.id);
                 LocalApiReply::Ok {
-                    data: peer_json.clone(),
+                    data: peer.to_string(),
                 }
             }
             LocalApiAction::Terminate => {
@@ -452,7 +489,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                 // went away: `close` is what the panel's Disconnect sends.
                 close(call.id);
                 LocalApiReply::Ok {
-                    data: peer_json.clone(),
+                    data: peer.to_string(),
                 }
             }
             LocalApiAction::Dismiss => {
@@ -467,27 +504,29 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                 // not a shortcut worth copying here.
                 self.remove_connection(call.id, true);
                 LocalApiReply::Ok {
-                    data: peer_json,
+                    data: peer.to_string(),
                 }
             }
         }
     }
 
-    /// Record a permission the local API just switched, then have the window redraw
-    /// from it.
+    /// Have the window redraw a session the local API just switched a permission for.
     ///
     /// The panel updates itself optimistically when a person clicks a switch; a call
     /// arriving over HTTP has no such click, so without this the switch would sit at
-    /// its old position until the next thing the server happens to send.
+    /// its old position until the next thing the server happens to send. The value
+    /// itself is already written down by `switch_permission`, which is what `GET
+    /// /sessions` reports - this is only the page's half of it.
     ///
-    /// What the window makes of it is the window's business: the Sciter page redraws
-    /// every field it is handed, while Flutter's `add_connection` only takes
-    /// `privacy_mode` for a session it already has, so there the other switches wait
-    /// for the next full refresh. The state recorded here is what `GET /sessions`
-    /// reports either way.
+    /// What the window makes of it is the window's business: the Sciter page takes
+    /// every field for a session it already has, while Flutter's `add_connection` only
+    /// takes `privacy_mode`, so there the other switches wait for the next full refresh.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn set_permission_locally(&self, id: i32, name: &str, enabled: bool) {
-        if let Some(client) = record_permission(id, name, enabled) {
+    fn redraw_permission(&self, id: i32) {
+        // Read, copy, then draw - the page runs while the lock is not held, the same way
+        // the other redraws here are written.
+        let client = CLIENTS.read().unwrap().get(&id).cloned();
+        if let Some(client) = client {
             self.ui_handler.add_connection(&client);
         }
     }
@@ -596,8 +635,33 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
         );
         return;
     }
+    // Written down here, where the switch is actually sent, because this is the common end
+    // of every door into a permission: the window's own click, the local API, and answering
+    // a peer's request. Only the click redraws the page from its own guess - the other two
+    // have no page behind them, and `GET /sessions` reads this record rather than the
+    // window, so a switch that stayed out of it looked like it had never happened to
+    // anyone reading the state (and to the customer page, which draws its checkboxes from
+    // exactly that).
+    //
+    // And only once the switch has really gone out: a record saying "on" for a message that
+    // never left this process is the same two-answers problem seen from the other side, and
+    // a connection that is on its way out is exactly when a caller is most likely to be
+    // reading the state to decide what to do next.
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {
-        allow_err!(client.tx.send(Data::SwitchPermission { name, enabled }));
+        if let Err(e) = client.tx.send(Data::SwitchPermission {
+            name: name.clone(),
+            enabled,
+        }) {
+            log::error!(
+                "permission {} for session {} was not sent: {}",
+                name,
+                id,
+                e
+            );
+            return;
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        record_permission(id, &name, enabled);
     };
 }
 
@@ -631,12 +695,9 @@ pub fn respond_control_request(id: i32, accepted: bool) {
         .map(|c| c.pending_permission.clone())
         .unwrap_or_default();
     if accepted && !permission.is_empty() && permission_change_allowed() {
-        // Recorded as well so that `GET /sessions` reports it and a window that opens late
-        // draws it; the window the answer came from moves its own switch, see
-        // `set_permission_locally`. Nothing is recorded when policy refuses, because then
-        // the switch below is dropped and nothing has really changed.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        record_permission(id, &permission, true);
+        // `switch_permission` writes the value down as well - see there - so nothing is
+        // reported here that did not go out. The window the answer came from moves its own
+        // switch optimistically; a window that opens late draws it from the record.
         switch_permission(id, permission, true);
     }
     if let Some(client) = CLIENTS.read().unwrap().get(&id) {

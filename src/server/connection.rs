@@ -683,13 +683,22 @@ impl Connection {
                         ipc::Data::ControlResponse { accepted } => {
                             // The local user answered the peer's control request.
                             // Approval lasts for this session only.
+                            // Which permission was answered is read before the answer is
+                            // settled, because settling it is what clears the request: an
+                            // audit line saying only "somebody agreed" cannot be told apart
+                            // from one where the keyboard went over - the empty name is the
+                            // keyboard here, the same spelling `control.timeout` records.
+                            let asked = conn.control_request_permission.clone();
                             conn.resolve_control_request(accepted).await;
                             crate::audit::record(
                                 if accepted { "control.approve" } else { "control.deny" },
                                 "customer",
                                 conn.lr.session_id,
                                 if accepted { "ok" } else { "denied" },
-                                serde_json::json!({"peer_id": conn.lr.my_id}),
+                                serde_json::json!({
+                                    "peer_id": conn.lr.my_id,
+                                    "permission": asked,
+                                }),
                             );
                         }
                         ipc::Data::Close => {

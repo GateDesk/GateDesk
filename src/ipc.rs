@@ -328,7 +328,13 @@ pub enum LocalApiAction {
     /// Let a peer in, or refuse it: the panel's Accept / Dismiss.
     Approve { accept: bool },
     /// Answer a pending control request: the panel's Allow / Deny.
-    Control { accept: bool },
+    ///
+    /// `name` is the permission the caller is answering for, in the spelling the local API
+    /// takes - `keyboard` for the mouse-and-keyboard gate. The request in flight names its
+    /// own permission, and an answer that does not match it is refused: without that a
+    /// caller that had read a stale `/sessions` would answer the keyboard and open the
+    /// clipboard instead.
+    Control { name: String, accept: bool },
     /// Flip one permission: the panel's switches.
     Permission { name: String, enabled: bool },
     /// End a session: the panel's Disconnect.

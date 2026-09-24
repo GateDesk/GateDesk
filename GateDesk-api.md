@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.22（2026-09-23）
+> 版本：1.24（2026-09-23）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -243,10 +243,10 @@ curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: a
 |------|--------|------|---------|
 | `GET /sessions` | 查看当前有哪些对端、各自能做什么、有没有等到本机应答的申请 | 连接管理器在跑 | `{"ok":true,"sessions":[…]}` |
 | `POST /approve` | 放行正在等待接入的对端，或拒绝它 | 对端正在等批准 | `{"ok":true,"result":{"peer_id":…}}` |
-| `POST /control` | 应答对端发来的一项申请，键鼠控制或某一项命名权限 | 有 `pending_control` | 同上 |
-| `POST /permission` | 不经申请，直接开关对端的某一项权限 | 会话已建立 | 同上 |
-| `POST /terminate` | 结束会话，与界面上的「断开」一致，对端可重连 | 会话在 | 同上 |
-| `POST /dismiss` | 把已结束的会话从列表里清掉，与「关闭」一致 | 会话确已结束 | 同上 |
+| `POST /control` | 应答对端发来的一项申请，键鼠控制或某一项命名权限（`name` 必填，与在途那项一致） | 有 `pending_control` | `{"ok":true,"result":{"peer_id":…,"name":…}}` |
+| `POST /permission` | 不经申请，直接开关对端的某一项权限 | 会话已建立 | `{"ok":true,"result":{"peer_id":…}}` |
+| `POST /terminate` | 结束会话，与界面上的「断开」一致，对端可重连 | 会话在 | `{"ok":true,"result":{"peer_id":…}}` |
+| `POST /dismiss` | 把已结束的会话从列表里清掉，与「关闭」一致 | 会话确已结束 | `{"ok":true,"result":{"peer_id":…}}` |
 
 本节的前提是：接入后默认只读，控制端要操作本机键鼠必须得到本机同意，同意来自界面上的人或来自本节接口。
 
@@ -267,7 +267,7 @@ curl -X POST "http://127.0.0.1:21120/password?token=<token>" -H "Content-Type: a
 | 接口 | 重复调用的结果 |
 |------|---------------|
 | `/approve` | 对已放行的对端返回 409；对拒绝过的对端仍返回 200，只是再关一次 |
-| `/control` | 申请已被应答过则返回 409 |
+| `/control` | 申请已被应答过则返回 409；`name` 与在途那项不符也返回 409 |
 | `/permission` | 把同一个值再写一遍 |
 | `/terminate` | 对已结束的会话是空操作，返回 200 |
 | `/dismiss` | 条目已清掉则返回 404 |
@@ -368,33 +368,36 @@ curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":3,\"acce
 POST /control
 ```
 
-**作用**：应答对端发来的一项申请，由本机决定。`/sessions` 里 `pending_control: true` 时走这里。两种申请共用这一个入口，用 `pending_permission` 区分：
+**作用**：应答对端发来的一项申请，由本机决定。`/sessions` 里 `pending_control: true` 时走这里。两种申请共用这一个入口，`name` 说的就是应答哪一项：
 
-- `pending_permission` 为空：对端要的是**键鼠控制**。`true` 交出控制，会话从只读变成可操作；`false` 拒绝，会话保持只读。
-- `pending_permission` 非空：对端要的是那一项权限（`clipboard` / `audio` / `file`）。`true` 时本机替本机用户把那项权限打开（与 §6.7.4 是同一批动作），`false` 则什么也不变。
+- `name` 为 `keyboard`：对端要的是**键鼠控制**。`accept: true` 交出控制，会话从只读变成可操作；`false` 拒绝，会话保持只读。
+- `name` 为 `clipboard` / `audio` / `file`：对端要的是那一项权限。`accept: true` 时本机替本机用户把那项权限打开（与 §6.7.4 是同一批动作），`false` 则什么也不变。
+
+`name` 是**必填**，而且必须与在途那项一致：本接口不再“应答在途的那一项”，因为调用方读的 `/sessions` 可能是旧的，届时一句 `accept: true` 会替本机用户打开一个它没想开的通道。要知道在途的是哪一项，读 `/sessions` 的 `pending_permission`（空字符串=键鼠，对应本接口的 `name: "keyboard"`）——两边名字就照这个对应关系写。
 
 | 参数 | 必填 | 类型 | 说明 |
 |------|------|------|------|
 | id | 是 | int | 会话标识 |
+| name | 是 | string | 应答哪一项：`keyboard` / `clipboard` / `audio` / `file`。与在途申请不符 → 409（v1.24 起必填） |
 | accept | 是 | bool | `true` 允许；`false` 拒绝 |
 
 **请求示例**
 
 ```powershell
-curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":3,\"accept\":true}"
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":3,\"name\":\"keyboard\",\"accept\":true}"
 ```
 
-**成功响应（200）**
+**成功响应（200）**：`result` 回显应答的那一项，便于调用方核对
 
 ```json
-{"ok":true,"result":{"peer_id":"123456789"}}
+{"ok":true,"result":{"peer_id":"123456789","name":"keyboard"}}
 ```
 
 **超时**：对端的申请有 60 秒时限，无人应答由服务端按拒绝处理，会话保持原样。静默不等于同意。超时记为 `control.timeout`。
 
-**什么时候会失败**：参数缺失或非法 → 400；会话不存在 → 404；当前没有待应答的申请（`pending_control: false`，可能已被界面点掉或已超时）→ 409 `no control request is pending`。
+**什么时候会失败**：参数缺失或非法 → 400（`name` 缺失或不在四个名字内同样是 400）；会话不存在 → 404；当前没有待应答的申请（`pending_control: false`，可能已被界面点掉或已超时）→ 409 `no control request is pending`；`name` 与在途申请不符 → 409 `the pending request is for clipboard`。
 
-**审计**：允许 → `control.approve`；拒绝 → `control.deny`；超时 → `control.timeout`。
+**审计**：允许 → `control.approve`；拒绝 → `control.deny`；超时 → `control.timeout`。`extra` 为 `{peer_id, permission}`，`permission` 空字符串是键鼠，其余为权限名（v1.24 起带这一项；此前只有 `peer_id`，事后分不出那次同意是交了键鼠还是开了剪贴板）。
 
 **本接口不是唯一的决定入口**：键鼠那一项，本机用户在连接管理器界面上点开键盘图标同样是「同意控制」，上游一直就是这个语义，本客户端保持它；关掉图标则是收回控制（§6.7.4）。两条路落到同一处，所以状态和审计不会出现两种说法。
 
@@ -509,6 +512,7 @@ POST /dismiss
 - 转发上报：若 `[options] audit-server-url` 已配置（如 GateDeskWeb 的 `http://<ip>:3000/api/audit`），事件以异步 POST 转发到该端点；失败静默（本地已兜底）。
 - 由本 API 引发的动作：`/password` 成功/失败 → `auth.grant`；`/connect` → `connect.start`（ok/err）；`/disconnect` 实际关闭会话 → `connect.close`。
 - 受控端会话动作（v1.8）：放行接入 → `login.approve`；拒绝接入 → `login.deny`；允许控制 → `control.approve`；拒绝控制 → `control.deny`；控制请求超时 → `control.timeout`；结束会话 → `session.terminate`；改权限 → `permission.change`。这些事件在真正执行的连接层记录，所以无论动作来自会话面板还是本 API，日志都一致，并且带会话号和对端 ID。代价是日志里看不出动作是谁发起的，平台侧需自行留日志。
+- 三个 `control.*` 的 `extra` 是 `{peer_id, permission}`，`permission` 空字符串表示键鼠，其余为权限名（`permission.change` 的 `extra` 是 `{peer_id, name, enabled}`）。`control.approve` / `control.deny` 自 v1.24 起才带 `permission`，此前只有 `peer_id`。
 - 会话内操作（控制端会话窗口/受控端执行点）也产生事件：`record.start/stop`、`remote.restart`、`privacy.on/off`、`block_input.on/off`、`voice.on/off`。
 
 审计事件由桌面端直接上报，不经本地 HTTP API 转发。本小节只说明事件来源，并作为排查 `audit.log` 的索引。
@@ -561,7 +565,7 @@ curl -X POST "http://127.0.0.1:21120/request-permission?token=<token>" -d "{\"id
 | 协议落点 | 清掉上游既有的 `OptionMessage.disable_keyboard`，与远程窗口菜单里的「请求控制」是同一动作，无新增字段 | 新加的 `OptionMessage.request_permission` 字段（v1.11）。它故意不是设置项：`disable_*` 说的是「我要关」，它说的是「可以吗」 |
 | 受控端闸门 | §6.7.3 的会话控制闸门；同意 = 交出键鼠控制，关掉即收回 | §6.7.4 的权限开关本身；同意 = 受控端本机替用户调一次那个开关，与他手动拨开关是同一批动作 |
 | 结果可见性 | 对端同意后发 `Permission::Keyboard`，控制端立刻能看出只读解开 | 没有回执，只能从通道是否真的可用反推（剪贴板能不能用、有没有声音） |
-| 审计（记在受控端） | `control.approve` / `control.deny` / `control.timeout` | 允许 → `permission.change`（`extra.name` 带权限名，`extra.enabled` 为 `true`）；超时 → `control.timeout`；请求本身不记事件 |
+| 审计（记在受控端） | `control.approve` / `control.deny` / `control.timeout`，`extra.permission` 为空表示键鼠 | 允许 → `control.approve` 与 `permission.change` 各一条（后者的 `extra.name` 带权限名、`extra.enabled` 为 `true`；前者的 `extra.permission` 也是那个权限名，两条可对着看）；拒绝 → `control.deny`；超时 → `control.timeout`；请求本身不记事件 |
 | 结果怎么判 | 受控端同意后会发一个明确的「键盘开了」信号，控制端据此解开只读 | 只能从通道真的能用反推；受控端那台机器自己的集成可以读 §6.7.1 |
 
 > ⚠️ 表里 `clipboard` / `audio` / `file` 三项是并列写的，但 `file` 多一层：它打开的是文件通道，「复制粘贴文件」能不能用还取决于被控端的构建 feature 与控制端的 `enable-file-copy-paste` 开关（两道闸，见 §6.7.4 边界）。文本剪贴板没有这两个额外条件。
@@ -770,7 +774,7 @@ recordings/<device_id>/<session_id>/<录像文件名>
 | 403 | Host 头非 localhost/127.0.0.1，或 `Origin` 非受信来源（v1.7） |
 | 404 | 未知路径；或会话接口中 `id` 对应的会话不存在（v1.8） |
 | 405 | 方法不允许 |
-| 409 | 会话当前状态与该动作不符：应答一个并不存在的申请（`/control`）、放行一个已经放行的对端（`/approve`）、清理一个还在进行的会话（`/dismiss`）、在权限被运维锁定时改权限（`/permission`，**`keyboard` 例外**） |
+| 409 | 会话当前状态与该动作不符：应答一个并不存在的申请（`/control`）、`name` 与在途那项申请不符（`/control`，v1.24）、放行一个已经放行的对端（`/approve`）、清理一个还在进行的会话（`/dismiss`）、在权限被运维锁定时改权限（`/permission`，**`keyboard` 例外**） |
 | 413 | 请求体 `Content-Length` 超过 1024 字节（v1.7） |
 | 500 | 服务端失败（如无法启动连接进程、设置密码失败） |
 | 503 | 本机没有连接管理器进程在监听（无会话、也无那个窗口），§6.7 的接口无法执行（v1.8）；或 `/request-permission` 找不到该对端的会话进程（v1.9 / v1.11） |
@@ -805,7 +809,7 @@ recordings/<device_id>/<session_id>/<录像文件名>
          └─ 兜底轮询 GET /sessions（建议 30 秒）
    └─ 决策
          ├─ 有会话 authorized=false         → 请求接入，按平台策略 POST /approve
-         ├─ 有会话 pending_control=true     → 请求键鼠或权限，按平台策略 POST /control
+         ├─ 有会话 pending_control=true     → 按 `/sessions` 的 `pending_permission` 决定应答哪一项，POST /control 带上同名 `name`
          └─ 有会话 disconnected=true        → 已结束，POST /dismiss 清理
    └─ 授权后需要收紧/放开能力 → POST /permission
    └─ 需要主动收尾 → POST /terminate
@@ -871,8 +875,14 @@ curl -s -o NUL -w "%{http_code}" -H "Origin: http://evil.example" "http://127.0.
 curl "http://127.0.0.1:21120/sessions?token=<token>"
 # 批准接入（把 <id> 换成 /sessions 返回的 id）→ 200，面板上对应卡片消失
 curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
-# 允许控制 → 200，会话面板上的「允许/拒绝」提示同步消失
-curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
+# 允许控制 → 200，会话面板上的「允许/拒绝」提示同步消失（name 必填且要与在途的那项一致）
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"keyboard\",\"accept\":true}"
+# 应答一项命名权限的申请 → 200，响应回显 name
+curl -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"accept\":true}"
+# name 与在途那项不符 → 409，错误里写明在途的是哪一项
+curl -s -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"name\":\"file\",\"accept\":true}"
+# name 不在四个名字之内或缺失 → 400
+curl -s -o NUL -w "%{http_code}" -X POST "http://127.0.0.1:21120/control?token=<token>" -d "{\"id\":<id>,\"accept\":true}"
 # 开关权限 → 200，面板上对应开关同步变化
 curl -X POST "http://127.0.0.1:21120/permission?token=<token>" -d "{\"id\":<id>,\"name\":\"clipboard\",\"enabled\":true}"
 # 请求对端开启一项权限（v1.15 合并，控制端；<ID> 是本机已 /connect 的对端设备 ID）
@@ -904,6 +914,8 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-23 | 1.24 | **`POST /control` 补上“应答的是哪一项”**（§6.7.3）：请求新增**必填** `name`（`keyboard` / `clipboard` / `audio` / `file`，与 `/request-permission` 同一套名字），必须与在途申请一致，不符 → 409 `the pending request is for …`；响应回显 `result.name`；审计 `control.approve` / `control.deny` 的 `extra` 从 `{peer_id}` 变为 `{peer_id, permission}`（空字符串=键鼠，与 `control.timeout` 一致）。此前本接口只认“在途的那一项”，调用方若拿着过期的 `/sessions`，一句 `accept: true` 会替本机用户打开一个它没想开的通道，且事后从审计里分不出那次同意是交了键鼠还是开了剪贴板。`employee.html` 同步：申请提示按 `pending_permission` 措辞（键鼠 / 剪贴板 / 声音 / 文件传输），按钮上带 `name`；`/control` 不带 `name` 的老调用方现在收到 400 |
+| 2026-09-23 | 1.23 | 修掉权限状态的两种说法（无接口变更）：同一次开关此前只写在其中一处 —— 人在受控端窗口里拨开关时，写的是窗口本地的值，`GET /sessions` 读的那份记录没有动（于是客户页 `/employee` 上的勾选框仍是关的，而通道其实已经通了）；反过来由本接口或应答申请拨动开关时，记录更新了，但窗口那一行不会重画，还是旧位置。现在 `switch_permission`（三条路的共同终点）在发出开关时就把值写进记录，`cm_sh.tis` 的 `addConnection` 对已存在的会话也一并按记录重画这四行 —— 于是窗口、`GET /sessions`、`GET /sessions` 的消费方（`/employee` 勾选框）三处一致。§6.7.4 里「三条落到同一段开关逻辑，所以状态不会出现两种说法」这句此前只是设计意图，现在成立。`--ui` 的原始窗口 `cm.tis` 未动，仍是上游行为 |
 | 2026-09-23 | 1.22 | 新增 §6.11 会话录像上传：由本 API `POST /connect` 发起的会话**自动录屏**，会话结束后把录像文件传到审计服务端 —— 上传地址由 `audit-server-url` 的源派生 `/api/record`，不新增地址配置键。协议沿用上游 rustdesk 的 `type=new/part/tail/remove` + raw body 分片；每个请求重试 3 次，失败放弃不重传，成功记 `record.upload.done`、失败记 `record.upload.fail`。本机文件在上传成功后保留 **3 天**，靠 `<文件名>.uploaded` 标记清理，未上传成功的不动。新增配置 `record-upload-mode`（`chunked` 默认 / `whole`）。客户端实现 `GateDesk/src/record_upload.rs`；接收端为 `GateDeskWeb` 的 `POST /api/record`，落在 `recordings/<device_id>/<session_id>/`。§6.11 另写明录像在本机与服务端的**存放位置**（分平台）、文件名与格式、查看命令 |
 | 2026-09-23 | 1.21 | 补充「文件复制粘贴」的**两道闸**（仅文档，无接口变更）：§6.7.4 边界新增一条 —— `file` 打开的是文件通道，复制粘贴文件还要求（1）被控端带 `unix-file-copy-paste` 编译，否则登录附加信息里不上报 `has_file_clipboard`，控制端会话菜单里连「允许复制粘贴文件」都不出现（两端同为 Windows 是唯一例外）；（2）控制端的会话选项 `enable-file-copy-paste` 要打开 —— 它按对端存于 `config/peers/<对端ID>.toml`（`ClientConfig`），不是 `GateDesk2.toml` 的 `[options]`，缺省为开（`GateDesk_default.toml` 可关）。§6.9 差异表后加一条指向说明 |
 | 2026-09-21 | 1.20 | 落地 §6.10 出站事件通知。上报侧新增 `GateDesk/src/event.rs`，用独立的配置键、队列和线程，不重试、无本地兜底、每次投递 3 秒上限；连接层四个点发出 `login.pending` / `control.pending` / `session.open` / `session.close`。接收侧 `GateDeskWeb` 新增 `POST /api/event` 并广播给页面，两个页面收到后立即拉 `/sessions`，兜底轮询在收到过事件之后由 2 秒放到 30 秒。`session.close` 的 `extra` 增加 `reason`。§6.7 各接口的「干什么」标签统一改为「作用」，§6.7.4 与 §8.1 措辞整理。附带修掉 `employee.html` 里仍在调用已删除的 `POST /voice` 的语音按钮，改为按会话调 `POST /permission {"name":"audio"}` |

@@ -350,7 +350,19 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         if (c.id == id) conn = c;
     });
     if (conn) {
+        // A session that is already on show. The original window takes only these two
+        // here, because the switches it is asked to redraw are the ones it drew itself:
+        // a person clicks a row, the page moves that row and the server is told. The row
+        // can also be moved from outside - the local API behind the customer page, or a
+        // peer's request somebody answered elsewhere - and then the page's copy is the
+        // one that is wrong, so every row this window draws is taken from what it is
+        // handed. The four are the A-class channels of the permission row below; the
+        // remaining switches have no row here.
         conn.authorized = authorized;
+        conn.keyboard = keyboard;
+        conn.clipboard = clipboard;
+        conn.audio = audio;
+        conn.file = file;
         conn.privacy_mode = privacy_mode;
         update();
         return;

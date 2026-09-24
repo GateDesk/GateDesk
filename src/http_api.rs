@@ -680,18 +680,36 @@ fn handle_approve(mut request: Request) {
     dispatch(request, id, LocalApiAction::Approve { accept });
 }
 
-/// `POST /control` `{"id":3,"accept":true}` - answer a peer's request to drive
-/// this machine's mouse and keyboard: the session panel's Allow / Deny.
+/// `POST /control` `{"id":3,"name":"keyboard","accept":true}` - answer a peer's
+/// request, one of the four the controlled side can be asked for: the session
+/// panel's Allow / Deny.
 ///
-/// Every session starts view-only, so this is what hands over the keyboard, and
-/// it lasts for that session only. A request nobody answers is denied once it
-/// times out, which is why silence is never read as consent.
+/// Every session starts view-only, so answering the keyboard hands it over, and it
+/// lasts for that session only. A request nobody answers is denied once it times
+/// out, which is why silence is never read as consent.
+///
+/// `name` names the permission being answered rather than taking it from the request
+/// in flight, so that an answer cannot land on a channel the caller did not mean: the
+/// two have to be the same, and the caller reads which one is waiting from
+/// `GET /sessions` (`pending_permission`). The empty spelling is not accepted here -
+/// the keyboard is a name on this side, the same as on `/request-permission`.
 fn handle_control(mut request: Request) {
     let body = read_body(&mut request, MAX_BODY_BYTES);
-    let (Some(id), Some(accept)) = (id_field(&body), bool_field(&body, "accept")) else {
-        return respond(request, 400, error_body("id and accept are required"));
+    let (Some(id), Some(name), Some(accept)) = (
+        id_field(&body),
+        json_field(&body, "name"),
+        bool_field(&body, "accept"),
+    ) else {
+        return respond(
+            request,
+            400,
+            error_body("id, name and accept are required"),
+        );
     };
-    dispatch(request, id, LocalApiAction::Control { accept });
+    if !matches!(name.as_str(), "keyboard" | "clipboard" | "audio" | "file") {
+        return respond(request, 400, error_body("unknown permission"));
+    }
+    dispatch(request, id, LocalApiAction::Control { name, accept });
 }
 
 /// `POST /permission` `{"id":3,"name":"clipboard","enabled":true}` - switch
