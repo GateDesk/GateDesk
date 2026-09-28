@@ -8,6 +8,8 @@
 	<string>GateDesk</string>
 	<key>CFBundleExecutable</key>
 	<string>gatedesk</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.carriez.GateDesk</string>
 	<key>CFBundleInfoDictionaryVersion</key>
