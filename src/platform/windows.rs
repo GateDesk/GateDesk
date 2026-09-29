@@ -3236,8 +3236,9 @@ impl Drop for WakeLock {
 // `GetModuleFileNameExW`, so the executable path comes back empty and the tray
 // is skipped before its command line is ever looked at.
 //
-// A second blind spot: 32-bit builds read the command line through `wmic`
-// (#11638), which is no longer installed by default since Windows 11 24H2.
+// A second blind spot: 32-bit builds used to read the command line through `wmic`
+// (#11638), which is no longer installed by default since Windows 11 24H2. They now ask
+// the kernel for it - see `query_process_command_line`.
 //
 // Both are cases of one process failing to inspect another, and patching the
 // inspection has regressed twice already (#6692), so use a named mutex instead:
@@ -3288,27 +3289,31 @@ pub fn try_lock_tray_single_instance() -> bool {
 fn kill_all_gatedesk_except_current() {
     let current_pid = get_current_pid();
     // Match the on-disk process image name (e.g. "gatedesk.exe"), not the bare app
-    // name (`APP_NAME` may still read "RustDesk" in a renamed build), since both
-    // `get_pids_of_process_with_args` and `kill_process_by_pids` compare against
-    // `process.name()`.
+    // name (`APP_NAME` may still read "RustDesk" in a renamed build), since
+    // `kill_process_by_pids` compares against `process.name()`.
     let app_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
         .unwrap_or_else(|| format!("{}.exe", crate::get_app_name()).to_lowercase());
-    // Enumerate known arg shapes separately: no-arg main process and the tray. The
-    // current tray is filtered out below so we do not terminate ourselves mid-flow.
-    for pids in [
-        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_name, &[]),
-        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_name, &["--tray"]),
-    ] {
-        let others = pids
-            .into_iter()
-            .filter(|pid| pid.as_u32() != current_pid)
-            .collect::<Vec<_>>();
-        if !others.is_empty() {
-            if let Err(err) = kill_process_by_pids(&app_name, others) {
-                log::debug!("Failed to stop some processes: {err}");
-            }
+    // Match on the image name alone, and on nothing else. Matching command line shapes
+    // ("", `--tray`) only ever catches the two the enumeration knows about, and the rest are
+    // not rare: a session window runs as `--connect <id>`, an explicit `--server` exists, so
+    // does `--portable-service-shmem-name=…`. A command line can also be unreadable in the
+    // first place - a medium-integrity process cannot read an elevated one, and the 32-bit
+    // build had no `wmic` to fall back on - while an image name always is.
+    let others = hbb_common::sysinfo::System::new_all()
+        .processes()
+        .iter()
+        .filter(|(pid, process)| {
+            pid.as_u32() != current_pid && process.name().to_lowercase() == app_name
+        })
+        .map(|(&pid, _)| pid)
+        .collect::<Vec<_>>();
+    for pid in others {
+        // One pid at a time: `kill_process_by_pids` gives up on the first process it cannot
+        // kill, and everything after it would survive the exit.
+        if let Err(err) = kill_process_by_pids(&app_name, vec![pid]) {
+            log::debug!("Failed to stop the process {pid}: {err}");
         }
     }
 }
@@ -3469,18 +3474,15 @@ pub fn update_me(debug: bool) -> ResultType<()> {
     let reg_msi_key = get_reg_msi_key(&subkey, is_msi)?;
 
     let app_exe_name = &format!("{}.exe", &app_name);
-    // NOTE: The pids below are matched by command line, which can silently come
-    // back empty even while the processes are running:
-    // - a 32-bit build cannot read the command line of a 64-bit process, so it
-    //   shells out to `wmic` instead (#11638), and `wmic` is no longer installed
-    //   by default since Windows 11 24H2;
-    // - a non-elevated process cannot read the command line of an elevated one.
+    // NOTE: The pids below are matched by command line, which can still come back
+    // empty even while the processes are running: a non-elevated process cannot read
+    // the command line of an elevated one. (The 32-bit build used to be a second case
+    // here - it shelled out to `wmic`, gone since Windows 11 24H2 - and now reads the
+    // command line through `query_process_command_line` instead.)
     // The `taskkill` in the commands below matches by image name and is not
     // affected, but `*_sessions` are then empty, so `_restore_session_guard`
     // silently restores nothing and the update leaves the user without a tray
-    // icon and main window until the app is launched again. Reading the command
-    // line through `NtQueryInformationProcess` instead would fix the queries for
-    // every caller.
+    // icon and main window until the app is launched again.
     let main_window_pids =
         crate::platform::get_pids_of_process_with_args::<_, &str>(&app_exe_name, &[]);
     let main_window_sessions = main_window_pids
@@ -4656,14 +4658,139 @@ pub fn is_cur_exe_the_installed() -> bool {
     path == exe.to_lowercase()
 }
 
+// A 32-bit build cannot read another process's command line the usual way: sysinfo walks the
+// target's PEB, and the offsets differ once the caller is WOW64 and the target is not, so
+// `cmd()` comes back empty. The old workaround shelled out to `wmic.exe` (#11638), which no
+// longer exists on Windows 11 24H2 - every query then returned an empty list silently, and
+// the callers that find or kill processes by command line stopped seeing them.
+//
+// `NtQueryInformationProcess(ProcessCommandLineInformation)` asks the kernel for the command
+// line itself, so the caller's bitness and the target's do not have to agree. The class is
+// undocumented but has been stable since Windows 8.1.
+#[cfg(not(target_pointer_width = "64"))]
+const PROCESS_COMMAND_LINE_INFORMATION_CLASS: u32 = 60;
+#[cfg(not(target_pointer_width = "64"))]
+const STATUS_BUFFER_TOO_SMALL: i32 = 0xC0000023u32 as i32;
+
+#[cfg(not(target_pointer_width = "64"))]
+#[repr(C)]
+struct ProcessCommandLineString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *const u16,
+}
+
+#[cfg(not(target_pointer_width = "64"))]
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtQueryInformationProcess(
+        process_handle: *mut winapi::ctypes::c_void,
+        process_information_class: u32,
+        process_information: *mut winapi::ctypes::c_void,
+        process_information_length: u32,
+        return_length: *mut u32,
+    ) -> i32;
+}
+
+/// A zeroed buffer for the kernel to write a `ProcessCommandLineString` into. It is made of
+/// `usize` elements so that the pointer at the end of that struct is naturally aligned.
+#[cfg(not(target_pointer_width = "64"))]
+fn query_buffer(bytes: u32) -> Vec<usize> {
+    vec![0usize; (bytes as usize).div_ceil(std::mem::size_of::<usize>())]
+}
+
+/// Read a process's command line, or `None` when it cannot be opened or queried. A process we
+/// are not allowed to read (an elevated one, from a medium-integrity caller) gives `None` just
+/// like a failing query does.
+#[cfg(not(target_pointer_width = "64"))]
+fn query_process_command_line(pid: u32) -> Option<String> {
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut size = 4096u32;
+    let mut buf = query_buffer(size);
+    let mut ret_len = 0u32;
+    let status = loop {
+        let status = unsafe {
+            NtQueryInformationProcess(
+                handle as _,
+                PROCESS_COMMAND_LINE_INFORMATION_CLASS,
+                buf.as_mut_ptr() as _,
+                size,
+                &mut ret_len,
+            )
+        };
+        // Grow to what the kernel asked for and ask once more; anything larger is a bogus length.
+        if status == STATUS_BUFFER_TOO_SMALL && ret_len > size && ret_len <= 1024 * 1024 {
+            size = ret_len;
+            buf = query_buffer(size);
+            continue;
+        }
+        break status;
+    };
+    unsafe { CloseHandle(handle) };
+    if status < 0 || ret_len < std::mem::size_of::<ProcessCommandLineString>() as u32 {
+        return None;
+    }
+    let command_line = unsafe { &*(buf.as_ptr() as *const ProcessCommandLineString) };
+    if command_line.length == 0 || command_line.buffer.is_null() {
+        return None;
+    }
+    let chars = unsafe {
+        std::slice::from_raw_parts(command_line.buffer, (command_line.length / 2) as usize)
+    };
+    Some(String::from_utf16_lossy(chars))
+}
+
+// The args are not compared strictly, only checked for containment. Parsing a command line
+// properly would need a `shell_words`-style splitter, and these callers only ever pass one
+// flag or nothing at all. An empty arg counts as no arg at all, which is how the callers
+// spell "the bare image name".
+#[cfg(not(target_pointer_width = "64"))]
+fn command_line_matches<S: AsRef<str>>(cmd_lower: &str, name_lower: &str, args: &[S]) -> bool {
+    let cmd = cmd_lower.trim_end();
+    let args = args
+        .iter()
+        .map(|arg| arg.as_ref().to_lowercase())
+        .filter(|arg| !arg.is_empty())
+        .collect::<Vec<_>>();
+    if args.is_empty() {
+        cmd.ends_with(name_lower) || cmd.ends_with(&format!("{}\"", name_lower))
+    } else {
+        args.iter().all(|arg| cmd.contains(arg))
+    }
+}
+
+/// Pids of processes whose image name is `name` and whose command line matches `args`.
+/// The 32-bit replacement for shelling out to `wmic`.
+#[cfg(not(target_pointer_width = "64"))]
+pub(super) fn get_pids_with_args_by_query<S1: AsRef<str>, S2: AsRef<str>>(
+    name: S1,
+    args: &[S2],
+) -> Vec<hbb_common::sysinfo::Pid> {
+    let name = name.as_ref().to_lowercase();
+    let system = hbb_common::sysinfo::System::new_all();
+    system
+        .processes()
+        .iter()
+        .filter(|(pid, process)| {
+            process.name().to_lowercase() == name
+                && query_process_command_line(pid.as_u32())
+                    .map(|cmd| command_line_matches(&cmd.to_lowercase(), &name, args))
+                    .unwrap_or(false)
+        })
+        .map(|(&pid, _)| pid)
+        .collect()
+}
+
 #[cfg(not(target_pointer_width = "64"))]
 pub fn get_pids_with_first_arg_check_session<S1: AsRef<str>, S2: AsRef<str>>(
     name: S1,
     arg: S2,
     same_session_id: bool,
 ) -> ResultType<Vec<hbb_common::sysinfo::Pid>> {
-    // Though `wmic` can return the sessionId, for simplicity we only return processid.
-    let pids = get_pids_with_first_arg_by_wmic(name, arg);
+    let pids = get_pids_with_args_by_query(name, &[arg]);
     if !same_session_id {
         return Ok(pids);
     }
@@ -4686,153 +4813,6 @@ pub fn get_pids_with_first_arg_check_session<S1: AsRef<str>, S2: AsRef<str>>(
         }
     }
     Ok(same_session_pids)
-}
-
-#[cfg(not(target_pointer_width = "64"))]
-fn get_pids_with_args_from_wmic_output<S2: AsRef<str>>(
-    output: std::borrow::Cow<'_, str>,
-    name: &str,
-    args: &[S2],
-) -> Vec<hbb_common::sysinfo::Pid> {
-    // CommandLine=
-    // ProcessId=33796
-    //
-    // CommandLine=
-    // ProcessId=34668
-    //
-    // CommandLine="C:\Program Files\RustDesk\RustDesk.exe" --tray
-    // ProcessId=13728
-    //
-    // CommandLine="C:\Program Files\RustDesk\RustDesk.exe"
-    // ProcessId=10136
-    let mut pids = Vec::new();
-    let mut proc_found = false;
-    for line in output.lines() {
-        if line.starts_with("ProcessId=") {
-            if proc_found {
-                if let Ok(pid) = line["ProcessId=".len()..].trim().parse::<u32>() {
-                    pids.push(hbb_common::sysinfo::Pid::from_u32(pid));
-                }
-                proc_found = false;
-            }
-        } else if line.starts_with("CommandLine=") {
-            proc_found = false;
-            let cmd = line["CommandLine=".len()..].trim().to_lowercase();
-            if args.is_empty() {
-                if cmd.ends_with(&name) || cmd.ends_with(&format!("{}\"", &name)) {
-                    proc_found = true;
-                }
-            } else {
-                proc_found = args.iter().all(|arg| cmd.contains(arg.as_ref()));
-            }
-        }
-    }
-    pids
-}
-
-// Note the args are not compared strictly, only check if the args are contained in the command line.
-// If we want to check the args strictly, we need to parse the command line and compare each arg.
-// Maybe we have to introduce some external crate like `shell_words` to do this.
-#[cfg(not(target_pointer_width = "64"))]
-pub(super) fn get_pids_with_args_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
-    name: S1,
-    args: &[S2],
-) -> Vec<hbb_common::sysinfo::Pid> {
-    let name = name.as_ref().to_lowercase();
-    std::process::Command::new("wmic.exe")
-        .args([
-            "process",
-            "where",
-            &format!("name='{}'", name),
-            "get",
-            "commandline,processid",
-            "/value",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|output| {
-            get_pids_with_args_from_wmic_output::<S2>(
-                String::from_utf8_lossy(&output.stdout),
-                &name,
-                args,
-            )
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(not(target_pointer_width = "64"))]
-fn get_pids_with_first_arg_from_wmic_output(
-    output: std::borrow::Cow<'_, str>,
-    name: &str,
-    arg: &str,
-) -> Vec<hbb_common::sysinfo::Pid> {
-    let mut pids = Vec::new();
-    let mut proc_found = false;
-    for line in output.lines() {
-        if line.starts_with("ProcessId=") {
-            if proc_found {
-                if let Ok(pid) = line["ProcessId=".len()..].trim().parse::<u32>() {
-                    pids.push(hbb_common::sysinfo::Pid::from_u32(pid));
-                }
-                proc_found = false;
-            }
-        } else if line.starts_with("CommandLine=") {
-            proc_found = false;
-            let cmd = line["CommandLine=".len()..].trim().to_lowercase();
-            if cmd.is_empty() {
-                continue;
-            }
-            if !arg.is_empty() && cmd.starts_with(arg) {
-                proc_found = true;
-            } else {
-                for x in [&format!("{}\"", name), &format!("{}", name)] {
-                    if cmd.contains(x) {
-                        let cmd = cmd.split(x).collect::<Vec<_>>()[1..].join("");
-                        if arg.is_empty() {
-                            if cmd.trim().is_empty() {
-                                proc_found = true;
-                            }
-                        } else if cmd.trim().starts_with(arg) {
-                            proc_found = true;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    pids
-}
-
-// Note the args are not compared strictly, only check if the args are contained in the command line.
-// If we want to check the args strictly, we need to parse the command line and compare each arg.
-// Maybe we have to introduce some external crate like `shell_words` to do this.
-#[cfg(not(target_pointer_width = "64"))]
-pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
-    name: S1,
-    arg: S2,
-) -> Vec<hbb_common::sysinfo::Pid> {
-    let name = name.as_ref().to_lowercase();
-    let arg = arg.as_ref().to_lowercase();
-    std::process::Command::new("wmic.exe")
-        .args([
-            "process",
-            "where",
-            &format!("name='{}'", name),
-            "get",
-            "commandline,processid",
-            "/value",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map(|output| {
-            get_pids_with_first_arg_from_wmic_output(
-                String::from_utf8_lossy(&output.stdout),
-                &name,
-                &arg,
-            )
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -4955,90 +4935,59 @@ mod tests {
     }
 
     #[cfg(not(target_pointer_width = "64"))]
+    // The kernel path, not the parser: runs the `NtQueryInformationProcess` call for real, as a
+    // 32-bit process, on a process we are allowed to read (ourselves).
+    #[cfg(not(target_pointer_width = "64"))]
     #[test]
-    fn test_get_pids_with_args_from_wmic_output() {
-        let output = r#"
-CommandLine=
-ProcessId=33796
-
-CommandLine=
-ProcessId=34668
-
-CommandLine="C:\Program Files\testapp\TestApp.exe" --tray
-ProcessId=13728
-
-CommandLine="C:\Program Files\testapp\TestApp.exe"
-ProcessId=10136
-"#;
-        let name = "testapp.exe";
-        let args = vec!["--tray"];
-        let pids = super::get_pids_with_args_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
-            name,
-            &args,
-        );
-        assert_eq!(pids.len(), 1);
-        assert_eq!(pids[0].as_u32(), 13728);
-
-        let args: Vec<&str> = vec![];
-        let pids = super::get_pids_with_args_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
-            name,
-            &args,
-        );
-        assert_eq!(pids.len(), 1);
-        assert_eq!(pids[0].as_u32(), 10136);
-
-        let args = vec!["--other"];
-        let pids = super::get_pids_with_args_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
-            name,
-            &args,
-        );
-        assert_eq!(pids.len(), 0);
+    fn query_process_command_line_reads_our_own() {
+        let cmd = super::query_process_command_line(std::process::id()).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let exe = exe.file_name().unwrap().to_string_lossy().to_lowercase();
+        assert!(cmd.to_lowercase().contains(&exe), "{cmd}");
     }
 
     #[cfg(not(target_pointer_width = "64"))]
     #[test]
-    fn test_get_pids_with_first_arg_from_wmic_output() {
-        let output = r#"
-CommandLine=
-ProcessId=33796
-
-CommandLine=
-ProcessId=34668
-
-CommandLine="C:\Program Files\testapp\TestApp.exe" --tray
-ProcessId=13728
-
-CommandLine="C:\Program Files\testapp\TestApp.exe"
-ProcessId=10136
-    "#;
+    fn command_line_matching_accepts_the_shapes_callers_pass() {
         let name = "testapp.exe";
-        let arg = "--tray";
-        let pids = super::get_pids_with_first_arg_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
+        // No args: the command line ends with the image name, quoted or not.
+        assert!(super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe""#,
             name,
-            arg,
-        );
-        assert_eq!(pids.len(), 1);
-        assert_eq!(pids[0].as_u32(), 13728);
-
-        let arg = "";
-        let pids = super::get_pids_with_first_arg_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
+            &[] as &[&str]
+        ));
+        assert!(super::command_line_matches(
+            r#"c:\program files\testapp\testapp.exe"#,
             name,
-            arg,
-        );
-        assert_eq!(pids.len(), 1);
-        assert_eq!(pids[0].as_u32(), 10136);
-
-        let arg = "--other";
-        let pids = super::get_pids_with_first_arg_from_wmic_output(
-            String::from_utf8_lossy(output.as_bytes()),
+            &[] as &[&str]
+        ));
+        // With args: containment, the same rule the `wmic` parser used.
+        assert!(super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe" --tray"#,
             name,
-            arg,
-        );
-        assert_eq!(pids.len(), 0);
+            &["--tray"]
+        ));
+        assert!(!super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe" --tray"#,
+            name,
+            &["--other"]
+        ));
+        // A session window is not the no-arg shape even though it also starts with the image.
+        assert!(!super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe" --connect 123456"#,
+            name,
+            &[] as &[&str]
+        ));
+        // An empty arg means "no arg", not "any arg".
+        assert!(super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe""#,
+            name,
+            &[""]
+        ));
+        assert!(!super::command_line_matches(
+            r#""c:\program files\testapp\testapp.exe" --connect 123456"#,
+            name,
+            &[""]
+        ));
     }
 }

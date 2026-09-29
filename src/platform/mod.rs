@@ -153,10 +153,12 @@ fn get_pids_of_process_with_args<S1: AsRef<str>, S2: AsRef<str>>(
 ) -> Vec<Pid> {
     // This function does not work when the process is 32-bit and the OS is 64-bit Windows,
     // `process.cmd()` always returns [] in this case.
-    // So we use `windows::get_pids_with_args_by_wmic()` instead.
+    // So a 32-bit build asks the kernel for the command line instead - see
+    // `windows::get_pids_with_args_by_query()`. (That used to go through `wmic`, which is
+    // gone on Windows 11 24H2.)
     #[cfg(all(target_os = "windows", not(target_pointer_width = "64")))]
     {
-        return windows::get_pids_with_args_by_wmic(name, args);
+        return windows::get_pids_with_args_by_query(name, args);
     }
     #[cfg(not(all(target_os = "windows", not(target_pointer_width = "64"))))]
     {
@@ -184,12 +186,11 @@ pub fn get_pids_of_process_with_first_arg<S1: AsRef<str>, S2: AsRef<str>>(
     name: S1,
     arg: S2,
 ) -> Vec<Pid> {
-    // This function does not work when the process is 32-bit and the OS is 64-bit Windows,
-    // `process.cmd()` always returns [] in this case.
-    // So we use `windows::get_pids_with_first_arg_by_wmic()` instead.
+    // The same split as `get_pids_of_process_with_args` above: a 32-bit build cannot read
+    // `process.cmd()` on 64-bit Windows, so it asks the kernel for the command line.
     #[cfg(all(target_os = "windows", not(target_pointer_width = "64")))]
     {
-        return windows::get_pids_with_first_arg_by_wmic(name, arg);
+        return windows::get_pids_with_args_by_query(name, &[arg]);
     }
     #[cfg(not(all(target_os = "windows", not(target_pointer_width = "64"))))]
     {
