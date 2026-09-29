@@ -1,6 +1,6 @@
 # GateDesk 本地 HTTP API 文档
 
-> 版本：1.31（2026-09-28）
+> 版本：1.32（2026-09-28）
 > 适用：GateDesk 客户端（Sciter 版，含内嵌 HTTP API 的构建）
 > 维护约定：**修改源码 `GateDesk/src/http_api.rs` 后必须同步更新本文档**（新增/变更接口、参数、响应、错误码，并在变更记录表加行）；如变更 `GateDesk2.toml` 的配置约定、路径或键语义，需同步更新「附录 A：GateDesk2.toml 配置文件」。
 
@@ -357,6 +357,8 @@ curl -X POST "http://127.0.0.1:21120/approve?token=<token>" -d '{"id":3,"accept"
 ```
 
 **什么时候会失败**：`id` 或 `accept` 缺失或非法 → 400；会话不存在 → 404；该对端已经放行过 → 409 `the peer is already through the door`。
+
+**受控端窗口**：`accept: true` 之后那张卡片随即变成已连接（Disconnect 按钮、计时开始），与现场的人自己点 Accept 一样；`accept: false` 不用管，连接结束时窗口自己把卡片拿掉。
 
 **审计**：放行 → `login.approve`；拒绝 → `login.deny`（见 §6.8）。
 
@@ -921,6 +923,7 @@ curl "http://127.0.0.1:3000/api/event?limit=10"
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-09-28 | 1.32 | **`POST /approve {"accept":true}` 现在会重画受控端窗口**（§6.7.2，无接口变更）：放行改的是已经在列表上的那张卡片的状态，而面板只由「人点了什么」和「服务端推了什么」驱动，接口调用两样都没有——于是对端已经连上、远程桌面都能用了，现场窗口还在写着「请求接入本机」并摆着 Accept / Dismiss 两个按钮（`GET /sessions` 与网页是对的，只有那扇窗口停在原处）。现在这一路由与 `/control`、`/permission` 同一条重画（`redraw_connection`，原 `redraw_permission`）。`accept:false` 不需要，连接结束会从另一端把卡片拿掉 |
 | 2026-09-28 | 1.31 | **重复申请已开着的通道不再弹窗**（§6.9，无接口变更）：受控端此前只有键鼠记得住「已经同意过」（`control_authorized`），`clipboard` / `audio` / `file` 三项的申请只看「当前有没有申请在途」，上一个申请一被答复，同一个申请再来就再画一次同意/拒绝——控制端每点一次，受控端多一次弹窗。现在这三项与键鼠同一条规则：通道已经开着就直接读作已同意，不再摆到本机用户眼前（`Connection::permission_granted`）；收回仍然只有一条路，受控端本机用户把开关拨回去，与键鼠「关掉即收回」一致 |
 | 2026-09-24 | 1.30 | **`/connect` 与请求体三处加固**（§6.2、§2、§7）：（1）`/connect` 的 `id` 此前只查长度，现在拒 `/`、`\`、空白与控制字符（它同时进子进程参数、`config/peers/<id>.toml` 与录像文件名）；（2）连接密码不再作为子进程的第三个参数，改为写临时文件（Unix 0600）后在参数位传 `@<路径>`，会话进程读完即删；spawn 那一行的日志也不再打印含密码的整个参数列表；（3）POST 不带 `Content-Length`（chunked）直接 411，此前只查 `Content-Length` 超限的 413，chunked 能绕过那道检查，body 被 `read_body` 截断读一半、剩余滞留在 keep-alive 连接里 |
 | 2026-09-24 | 1.29 | 文档里 18 处 curl 的 JSON body 统一成 `-d '{"…"}'`（仅文档）：原 §6.5 写成 `-d '{\"…\"}'`，单引号内不做转义，反斜杠会原样发出去，body 不是合法 JSON，照抄必失败（400 `missing or invalid password`）；其余 17 处用双引号加转义，bash 可用，但 PowerShell 下同样会把反斜杠发出去。单引号写法两种 shell 都能直接粘贴 |

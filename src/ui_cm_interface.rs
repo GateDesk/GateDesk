@@ -412,11 +412,19 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                         reason: "the peer is already through the door".to_owned(),
                     };
                 }
-                // The server answers an authorization with a `Login` carrying
-                // `authorized`, and that is what redraws the card; a refusal is the
-                // same `Close` the panel's Dismiss sends, which ends the connection.
+                // A refusal is the same `Close` the panel's Dismiss sends, and the card goes
+                // away from the other end: the connection reports itself closed and the
+                // window takes the session off the list (`Data::Close`).
+                //
+                // Letting the peer in has no such echo. It changes a session that is already
+                // on the list, and the only thing that used to draw that change was the
+                // window's own click - so answering here left the card saying "Request
+                // access to your device..." under a session that was already running. The
+                // record is written by `authorize` either way, and this is the window's half
+                // of it, the same one `redraw_connection` gives the other calls.
                 if accept {
                     authorize(call.id);
+                    self.redraw_connection(call.id);
                 } else {
                     close(call.id);
                 }
@@ -452,7 +460,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                 // page behind it - `switch_permission` has written the value down by now,
                 // and this is the window's half of it. Nothing moved when the request was
                 // for the keyboard; the redraw is then the record as it already stands.
-                self.redraw_permission(call.id);
+                self.redraw_connection(call.id);
                 // Told back so that the answer names what it answered, not just whose
                 // session it was.
                 let mut data = peer;
@@ -479,7 +487,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
                     };
                 }
                 switch_permission(call.id, name, enabled);
-                self.redraw_permission(call.id);
+                self.redraw_connection(call.id);
                 LocalApiReply::Ok {
                     data: peer.to_string(),
                 }
@@ -510,19 +518,20 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         }
     }
 
-    /// Have the window redraw a session the local API just switched a permission for.
+    /// Have the window draw a session again from the record.
     ///
-    /// The panel updates itself optimistically when a person clicks a switch; a call
-    /// arriving over HTTP has no such click, so without this the switch would sit at
-    /// its old position until the next thing the server happens to send. The value
-    /// itself is already written down by `switch_permission`, which is what `GET
-    /// /sessions` reports - this is only the page's half of it.
+    /// The panel updates itself optimistically when a person clicks in it - a switch, or
+    /// Accept. A call arriving over HTTP has no such click, so without this the change it
+    /// just made would sit there invisible until the next thing the server happens to send.
+    /// Both callers have written the value down by now (`switch_permission`, `authorize`),
+    /// which is what `GET /sessions` reports; this is only the window's half of it.
     ///
-    /// What the window makes of it is the window's business: the Sciter page takes
-    /// every field for a session it already has, while Flutter's `add_connection` only
-    /// takes `privacy_mode`, so there the other switches wait for the next full refresh.
+    /// What the window makes of it is the window's business: the Sciter page takes every
+    /// field for a session it already has, and Flutter's `add_connection` takes `authorized`
+    /// and `privacy_mode` and ignores the rest, so there the other switches wait for the
+    /// next full refresh.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn redraw_permission(&self, id: i32) {
+    fn redraw_connection(&self, id: i32) {
         // Read, copy, then draw - the page runs while the lock is not held, the same way
         // the other redraws here are written.
         let client = CLIENTS.read().unwrap().get(&id).cloned();
