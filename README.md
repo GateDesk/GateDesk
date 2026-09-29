@@ -103,7 +103,7 @@ vcpkg install --triplet x86-windows-static
 The UI is compiled into the binary under `--features inline`, from the generated `src/ui/inline.rs`. That file is not in the repository, so generate it once (and again after every change under `src/ui/`):
 
 ```powershell
-py -3 res/inline-sciter.py
+python3 res/inline-sciter.py
 ```
 
 x64:
@@ -125,8 +125,8 @@ cargo build --locked --release --features inline --target i686-pc-windows-msvc -
 `build.py` builds and packages in one step, one architecture per run:
 
 ```powershell
-py -3 build.py --arch x64
-py -3 build.py --arch x86
+python3 build.py --arch x64
+python3 build.py --arch x86
 ```
 
 Both packages are written to the repository root, as `gatedesk-<version>-x64-win7-install.exe` and `gatedesk-<version>-x86-win7-install.exe`. The architecture is part of the name because both land in the same directory. Add `--portable` for a self-extracting portable build instead of the installer. Without `--arch` the host architecture is built and the package keeps its unsuffixed name.
@@ -198,6 +198,76 @@ wget https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/lib
 mv libsciter-gtk.so target/debug
 VCPKG_ROOT=$HOME/vcpkg cargo run
 ```
+
+## How to Build on macOS
+
+Both architectures ship: `x64` (Intel) and `arm64` (Apple Silicon). They are separate builds that the packaging step below merges into one universal `.app`.
+
+### Prerequisites
+
+- **Xcode** — `xcode-select --install` is enough for the Sciter build; the Flutter route needs the full Xcode.
+- **Homebrew** — `python3`, `cmake`, `nasm`, `ninja`, `pkg-config`, and `create-dmg` for the Flutter dmg.
+- **vcpkg** — `VCPKG_ROOT` set, with the same packages as Linux: `vcpkg install libvpx libyuv opus aom`. The install is per triplet, so a cross build needs a second one; see below.
+- **Rust** — via rustup. `rust-toolchain.toml` pins the version in this directory, so no `rustup default` is needed. A cross build also needs its target: `rustup target add aarch64-apple-darwin`.
+- **Sciter runtime** — `libsciter.dylib` in the repository root, as for Linux. The download is already a universal binary, so one copy serves both architectures.
+
+`res/macos-app/setup_macos.sh` installs all of the above in one go: `--sciter` also fetches the dylib, `--flutter` adds the Flutter toolchain, and `--build` builds at the end. The commands below are what it runs.
+
+### Build
+
+`cargo`, with the Sciter UI compiled into the binary (`--features inline`, the same as Windows):
+
+```sh
+cargo build --locked --release --features inline
+```
+
+`build.py` is that same build with the feature flags spelled for you:
+
+```sh
+python3 build.py                     # inline only-
+python3 build.py --hwcodec           # VideoToolbox encode/decode
+python3 build.py --screencapturekit  # macOS capture backend
+```
+
+`--arch` cross-builds, `x64` (x86_64-apple-darwin) or `arm64` (aarch64-apple-darwin); the host architecture is the default:
+
+```sh
+python3 build.py --arch arm64
+```
+
+From an Intel Mac that arm64 build is a genuine cross build, so it needs the target and its own vcpkg packages first — `libs/scrap/build.rs` links `$VCPKG_ROOT/installed/arm64-osx`, which `vcpkg install --triplet x64-osx` does not create:
+
+```sh
+rustup target add aarch64-apple-darwin
+"$VCPKG_ROOT/vcpkg" install libvpx libyuv opus aom --triplet arm64-osx
+```
+
+The same build through `cargo` directly is the plain line plus `--target`:
+
+```sh
+cargo build --locked --release --features inline --target aarch64-apple-darwin
+```
+
+Cargo keeps the two apart, in `target/x86_64-apple-darwin/release/` and `target/aarch64-apple-darwin/release/`, so neither overwrites the other. The arm64 binary itself is only openable on an Apple Silicon Mac (an x86_64 one runs on Apple Silicon through Rosetta 2) — which is the point of the two-slice `.app` below.
+
+Add `--flutter` for the Flutter UI. That route also needs `flutter/lib/generated_bridge.dart` — gitignored, generated from `src/flutter_ffi.rs` — and a Flutter toolchain on `PATH`:
+
+```sh
+flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+python3 build.py --flutter
+```
+
+### Package
+
+macOS does not package through `cargo-bundle`, so `build.py` stops after building. The `.app` comes from:
+
+```sh
+res/macos-app/make-gatedesk-app.sh
+```
+
+It collects every binary it finds under `target/` — both cross slices and a plain host build — merges them with `lipo`, and writes `target/release/GateDesk.app` with its own `Info.plist`, icon, and a signature from the `GateDesk Development` identity (`create-codesign-cert.sh` creates that certificate on first run). That is why a universal build is `python3 build.py --arch x64`, `python3 build.py --arch arm64`, and then one script run: with a single slice the `.app` is that architecture alone.
+
+Screen Recording and Microphone have to be granted to **GateDesk** once (System Settings > Privacy & Security). Launching `GateDesk.app/Contents/MacOS/gatedesk` keeps the logs in the terminal while TCC still attributes the grant to the bundle.
 
 ## How to build with Docker
 
