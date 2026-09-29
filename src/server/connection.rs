@@ -2369,6 +2369,27 @@ impl Connection {
         matches!(name, "clipboard" | "audio" | "file")
     }
 
+    /// Whether one of those named channels is already open for this session.
+    ///
+    /// The three have no gate of their own the way the keyboard has `control_authorized`:
+    /// the permission *is* the answer, written by the door the local user answers through
+    /// (`respond_control_request` -> `switch_permission`, or the window's own row). So this
+    /// is what a repeated request is measured against - the same question
+    /// `control_authorized` answers for the keyboard - and turning the channel off is how
+    /// the local user takes it back, which is the same "off takes it back" the keyboard
+    /// switch has.
+    ///
+    /// The caller has already been through `is_requestable_permission`, so `name` is one of
+    /// those three; anything else reads as not open.
+    fn permission_granted(&self, name: &str) -> bool {
+        match name {
+            "clipboard" => self.clipboard,
+            "audio" => self.audio,
+            "file" => self.file,
+            _ => false,
+        }
+    }
+
     /// Take the local user's keyboard switch as their answer to the control gate.
     ///
     /// Upstream lets the person at this machine hand the keyboard over by clicking that
@@ -5147,6 +5168,18 @@ impl Connection {
                 // turned away by the local API before it gets this far, so this is for the
                 // log.
                 log::warn!("ignored a peer request for permission {}", name);
+            } else if self.permission_granted(&name) {
+                // The channel is already open for this session, so there is nothing to put
+                // to anybody: the answer stands until the local user takes the channel back.
+                // Asked once, answered once - the same rule the keyboard's own gate keeps,
+                // and this is that rule for the three channels that have no gate of their
+                // own. Without it a peer repeating a request for a channel it was already
+                // given put the same question up on the local user's screen again, and the
+                // more often it asked, the more prompts there were to answer.
+                log::info!(
+                    "a peer asked for permission {}, which is already open here",
+                    name
+                );
             } else if !self.control_requested {
                 self.control_requested = true;
                 self.control_request_permission = name.clone();
